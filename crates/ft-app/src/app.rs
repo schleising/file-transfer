@@ -78,6 +78,7 @@ pub struct FileTransferApp {
     preflight_ok: Option<Result<String, String>>,
     progress: Progress,
     transferring: bool,
+    active_job_id: Option<Uuid>,
     status_line: String,
     cancel: Arc<AtomicBool>,
 
@@ -125,6 +126,7 @@ impl FileTransferApp {
             preflight_ok: None,
             progress: Progress::default(),
             transferring: false,
+            active_job_id: None,
             status_line: String::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             new_name: String::new(),
@@ -360,31 +362,39 @@ impl FileTransferApp {
                 BgMsg::Preflight(r) => {
                     self.preflight_ok = Some(r);
                 }
-                BgMsg::Progress(p) => self.progress = p,
+                BgMsg::Progress(p) => {
+                    let data_complete = p.data_complete;
+                    let bytes_done = p.bytes_done;
+                    self.progress = p;
+                    if data_complete {
+                        self.mark_transfer_complete(bytes_done, false);
+                    }
+                },
                 BgMsg::TransferDone(r) => {
-                    self.transferring = false;
                     match r {
                         Ok((job_id, bytes, cancelled)) => {
-                            if let Ok(mut jobs) = self.store.jobs() {
+                            if self.transferring || self.active_job_id == Some(job_id) {
+                                self.mark_transfer_complete(bytes, cancelled);
+                            } else if let Ok(mut jobs) = self.store.jobs() {
+                                // Background thread finished after UI already marked complete.
                                 if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                                    job.finished_at = Some(Utc::now());
-                                    job.bytes_transferred = Some(bytes);
-                                    job.status = if cancelled {
-                                        JobStatus::Cancelled
-                                    } else {
-                                        JobStatus::Ok
-                                    };
-                                    let _ = self.store.update_job(job);
+                                    if job.status == JobStatus::Running {
+                                        job.finished_at = Some(Utc::now());
+                                        job.bytes_transferred = Some(bytes);
+                                        job.status = if cancelled {
+                                            JobStatus::Cancelled
+                                        } else {
+                                            JobStatus::Ok
+                                        };
+                                        let _ = self.store.update_job(job);
+                                        self.reload_store();
+                                    }
                                 }
                             }
-                            self.status_line = if cancelled {
-                                "Cancelled".into()
-                            } else {
-                                format!("Transfer complete ({bytes} bytes)")
-                            };
-                            self.reload_store();
                         }
                         Err(e) => {
+                            self.transferring = false;
+                            self.active_job_id = None;
                             self.status_line = format!("Transfer failed: {e}");
                             self.reload_store();
                         }
@@ -495,6 +505,7 @@ impl FileTransferApp {
         let _ = self.store.insert_job(&job);
 
         self.transferring = true;
+        self.active_job_id = Some(job_id);
         self.cancel.store(false, Ordering::SeqCst);
         self.progress = Progress {
             bytes_total: plan.bytes_total,
@@ -540,6 +551,33 @@ impl FileTransferApp {
                 }
             }
         });
+    }
+
+    fn mark_transfer_complete(&mut self, bytes: u64, cancelled: bool) {
+        if !self.transferring && self.active_job_id.is_none() {
+            return;
+        }
+        self.transferring = false;
+        if let Some(job_id) = self.active_job_id.take() {
+            if let Ok(mut jobs) = self.store.jobs() {
+                if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
+                    job.finished_at = Some(Utc::now());
+                    job.bytes_transferred = Some(bytes);
+                    job.status = if cancelled {
+                        JobStatus::Cancelled
+                    } else {
+                        JobStatus::Ok
+                    };
+                    let _ = self.store.update_job(job);
+                }
+            }
+        }
+        self.status_line = if cancelled {
+            "Cancelled".into()
+        } else {
+            format!("Transfer complete ({})", format_bytes(bytes))
+        };
+        self.reload_store();
     }
 }
 
@@ -959,11 +997,15 @@ impl FileTransferApp {
             }
         };
 
-        let frac = match (self.progress.bytes_done, self.progress.bytes_total) {
-            (done, Some(total)) if total > 0 => (done as f32 / total as f32).clamp(0.0, 1.0),
-            _ if self.transferring => -1.0,
-            (done, _) if done > 0 => 1.0,
-            _ => 0.0,
+        let frac = if let Some(pct) = self.progress.percent {
+            (pct / 100.0).clamp(0.0, 1.0)
+        } else {
+            match (self.progress.bytes_done, self.progress.bytes_total) {
+                (done, Some(total)) if total > 0 => (done as f32 / total as f32).clamp(0.0, 1.0),
+                _ if self.transferring => -1.0,
+                (done, _) if done > 0 => 1.0,
+                _ => 0.0,
+            }
         };
         if frac < 0.0 {
             ui.add(
@@ -975,19 +1017,24 @@ impl FileTransferApp {
                     )),
             );
         } else {
+            let pct_label = (frac * 100.0).round();
             let text = match self.progress.bytes_total {
                 Some(t) => format!(
-                    "{} / {} ({:.0}%){rate_eta}",
+                    "{} / {} ({pct_label:.0}%){rate_eta}",
                     format_bytes(self.progress.bytes_done),
                     format_bytes(t),
-                    frac * 100.0
                 ),
-                None => format!("{}{rate_eta}", format_bytes(self.progress.bytes_done)),
+                None => format!(
+                    "{} ({pct_label:.0}%){rate_eta}",
+                    format_bytes(self.progress.bytes_done)
+                ),
             };
             ui.add(egui::ProgressBar::new(frac).text(text));
         }
         if let Some(cur) = &self.progress.current_file {
             ui.label(format!("Current: {cur}"));
+        } else if !self.progress.message.is_empty() && self.transferring {
+            ui.label(&self.progress.message);
         }
         if !self.status_line.is_empty() {
             ui.label(&self.status_line);

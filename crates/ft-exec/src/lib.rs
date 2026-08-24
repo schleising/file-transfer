@@ -3,11 +3,11 @@
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Connection / path identity used by the executor (no DB types).
 #[derive(Debug, Clone)]
@@ -37,6 +37,10 @@ pub struct Progress {
     pub bytes_per_sec: Option<f64>,
     /// Estimated seconds remaining, when total and rate are known.
     pub eta_secs: Option<u64>,
+    /// Rsync's own progress percent (0–100), when parsed from progress2.
+    pub percent: Option<f32>,
+    /// True once rsync reports `100%` with `to-chk=0` (payload done; process may still exit).
+    pub data_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +103,7 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 /// Options for non-interactive SSH (controller→host and host→host).
+/// Do **not** put `-n` here: rsync `-e ssh` needs stdin for the protocol.
 fn ssh_common_opts() -> &'static [&'static str] {
     &[
         "-o",
@@ -107,8 +112,14 @@ fn ssh_common_opts() -> &'static [&'static str] {
         "ConnectTimeout=8",
         "-o",
         "StrictHostKeyChecking=accept-new",
+        // Avoid known_hosts rewrites at session end (can add a noticeable pause).
         "-o",
-        "UpdateHostKeys=yes",
+        "UpdateHostKeys=no",
+        // Avoid ControlMaster sessions that can keep stdio open after the command exits.
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
     ]
 }
 
@@ -154,6 +165,9 @@ fn explain_peer_ssh_error(from: &HostRef, to: &HostRef, stderr: &str) -> String 
 
 fn ssh_base(host: &HostRef) -> Command {
     let mut cmd = Command::new("ssh");
+    // Remote one-shot commands never need local stdin; closing it avoids rare end hangs
+    // when the GUI inherits a TTY (e.g. cargo run).
+    cmd.arg("-n");
     for o in ssh_common_opts() {
         cmd.arg(o);
     }
@@ -164,6 +178,15 @@ fn ssh_base(host: &HostRef) -> Command {
         cmd.arg("-i").arg(id);
     }
     cmd.arg(&host.ssh_destination);
+    cmd
+}
+
+/// SSH session that runs a remote rsync and streams progress back to the controller.
+fn ssh_orchestrate(host: &HostRef) -> Command {
+    let mut cmd = ssh_base(host);
+    // Force a pseudo-tty so remote rsync progress is line-flushed through SSH instead of
+    // block-buffered until session teardown.
+    cmd.arg("-tt");
     cmd
 }
 
@@ -695,7 +718,10 @@ fn rsync_common_args(cmd: &mut Command) {
     cmd.arg("-a")
         .arg("-r") // explicit: with --files-from, ensure directories are scanned
         .arg("--inplace") // write destination in place (no .<name>.XXXXXX temp + rename)
-        .arg("--info=progress2");
+        .arg("--info=progress2")
+        // Not a TTY when piped: without this, progress/stderr can be block-buffered and
+        // flush only when the process exits (looks like a long hang at ~100%).
+        .arg("--outbuf=N");
 }
 
 fn run_rsync_local_client(
@@ -743,7 +769,10 @@ fn run_rsync_local_client(
     };
 
     cmd.arg(&src).arg(&dst);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // progress2 is written to stdout (rsync 3.x); must drain it or the process can block.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let child = cmd.spawn().context("spawn rsync")?;
     watch_child(child, plan.bytes_total, cancel, on_progress)
@@ -806,8 +835,13 @@ fn run_remote_orchestrated(
          {body}",
         body = if push {
             format!(
-                "\"$RSYNC\" -a -r --inplace --info=progress2 --files-from={list} -e {ssh_e} \
-                 --rsync-path={rpath} {src}/ {peer}:{dst}/; ec=$?; rm -f {list}; exit $ec",
+                "if command -v stdbuf >/dev/null 2>&1; then \
+                   stdbuf -oL \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --files-from={list} -e {ssh_e} \
+                   --rsync-path={rpath} {src}/ {peer}:{dst}/; \
+                 else \
+                   \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --files-from={list} -e {ssh_e} \
+                   --rsync-path={rpath} {src}/ {peer}:{dst}/; \
+                 fi; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
                 ssh_e = shell_quote(&ssh_e),
                 rpath = shell_quote(rsync_remote),
@@ -817,8 +851,13 @@ fn run_remote_orchestrated(
             )
         } else {
             format!(
-                "\"$RSYNC\" -a -r --inplace --info=progress2 --files-from={list} -e {ssh_e} \
-                 --rsync-path={rpath} {peer}:{src}/ {dst}/; ec=$?; rm -f {list}; exit $ec",
+                "if command -v stdbuf >/dev/null 2>&1; then \
+                   stdbuf -oL \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --files-from={list} -e {ssh_e} \
+                   --rsync-path={rpath} {peer}:{src}/ {dst}/; \
+                 else \
+                   \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --files-from={list} -e {ssh_e} \
+                   --rsync-path={rpath} {peer}:{src}/ {dst}/; \
+                 fi; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
                 ssh_e = shell_quote(&ssh_e),
                 rpath = shell_quote(rsync_remote),
@@ -829,9 +868,12 @@ fn run_remote_orchestrated(
         }
     );
 
-    let mut cmd = ssh_base(runner);
+    let mut cmd = ssh_orchestrate(runner);
     cmd.arg(script);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Remote progress2 arrives on ssh stdout; drain both pipes or ssh can stall on a full buffer.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let child = cmd.spawn().context("spawn remote rsync via ssh")?;
     watch_child(child, plan.bytes_total, cancel, on_progress)
 }
@@ -842,6 +884,8 @@ fn watch_child(
     cancel: Arc<AtomicBool>,
     on_progress: &impl Fn(Progress),
 ) -> Result<TransferResult> {
+    // rsync --info=progress2 writes to stdout (\r-separated). Drain stdout+stderr or
+    // the child (especially ssh) can block once the pipe buffer fills.
     let stdout = child.stdout.take().context("stdout")?;
     let stderr = child.stderr.take().context("stderr")?;
 
@@ -854,7 +898,6 @@ fn watch_child(
         let _ = Command::new("kill").arg(pid_hint.to_string()).output();
     });
 
-    // progress2 goes to stderr and uses \r. Must drain both pipes or rsync blocks.
     let (tx, rx) = mpsc::channel::<RsyncChunk>();
     {
         let tx = tx.clone();
@@ -868,48 +911,164 @@ fn watch_child(
     let mut bytes_done = 0u64;
     let mut err_buf = String::new();
     let mut rate_bps: Option<f64> = None;
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let mut last_sample = started;
     let mut last_bytes = 0u64;
+    let mut last_progress_at = started;
+    let mut last_percent: Option<f32> = None;
+    let mut child_status: Option<ExitStatus> = None;
+    let mut streams_done = 0u8;
+    // After the process exits, do not wait indefinitely for pipe EOF — a grandchild
+    // (ssh) can keep a write end open briefly after the parent has exited.
+    let mut exited_at: Option<Instant> = None;
+    let mut data_complete = false;
 
-    while let Ok(chunk) = rx.recv() {
+    loop {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        let (line, from_stderr) = match chunk {
-            RsyncChunk::ProgressLine(line) => (line, false),
-            RsyncChunk::ErrText(line) => (line, true),
-            RsyncChunk::Done => continue,
-        };
-        if let Some(parsed) = parse_progress2(&line) {
-            bytes_done = parsed.bytes_done;
-            if let Some(r) = parsed.bytes_per_sec {
-                rate_bps = Some(r);
-            } else {
-                let dt = last_sample.elapsed().as_secs_f64();
-                if dt >= 0.5 && bytes_done >= last_bytes {
-                    let instant = (bytes_done - last_bytes) as f64 / dt;
-                    rate_bps = Some(match rate_bps {
-                        Some(prev) => prev * 0.7 + instant * 0.3,
-                        None => instant,
-                    });
-                    last_sample = std::time::Instant::now();
-                    last_bytes = bytes_done;
-                } else if rate_bps.is_none() {
-                    let elapsed = started.elapsed().as_secs_f64().max(0.001);
-                    rate_bps = Some(bytes_done as f64 / elapsed);
+
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(RsyncChunk::Done) => {
+                streams_done = streams_done.saturating_add(1);
+            }
+            Ok(chunk) => {
+                let (line, is_err_text) = match chunk {
+                    RsyncChunk::ProgressLine(line) => (line, false),
+                    RsyncChunk::ErrText(line) => (line, true),
+                    RsyncChunk::Done => unreachable!(),
+                };
+                if let Some(parsed) = parse_progress2(&line) {
+                    bytes_done = parsed.bytes_done;
+                    last_progress_at = Instant::now();
+                    if let Some(p) = parsed.percent {
+                        last_percent = Some(p as f32);
+                    }
+                    if let Some(r) = parsed.bytes_per_sec {
+                        rate_bps = Some(r);
+                    } else {
+                        let dt = last_sample.elapsed().as_secs_f64();
+                        if dt >= 0.5 && bytes_done >= last_bytes {
+                            let instant = (bytes_done - last_bytes) as f64 / dt;
+                            rate_bps = Some(match rate_bps {
+                                Some(prev) => prev * 0.7 + instant * 0.3,
+                                None => instant,
+                            });
+                            last_sample = Instant::now();
+                            last_bytes = bytes_done;
+                        } else if rate_bps.is_none() {
+                            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                            rate_bps = Some(bytes_done as f64 / elapsed);
+                        }
+                    }
+                    if transfer_data_complete(&parsed, bytes_total, bytes_done) {
+                        data_complete = true;
+                    }
+                    let mut prog = make_progress(
+                        bytes_done,
+                        bytes_total,
+                        rate_bps,
+                        parsed.percent.map(|p| p as f32),
+                        data_complete,
+                    );
+                    if data_complete {
+                        prog.message = "Done".into();
+                        prog.eta_secs = Some(0);
+                    }
+                    on_progress(prog);
+
+                    if data_complete {
+                        return Ok(finish_transfer_early(
+                            child,
+                            rx,
+                            bytes_done,
+                            bytes_total,
+                            rate_bps,
+                            on_progress,
+                        ));
+                    }
+                } else if is_err_text && !line.trim().is_empty() {
+                    err_buf.push_str(&line);
+                    if !line.ends_with('\n') {
+                        err_buf.push('\n');
+                    }
                 }
             }
-            on_progress(make_progress(bytes_done, bytes_total, rate_bps));
-        } else if from_stderr && !line.trim().is_empty() {
-            err_buf.push_str(&line);
-            if !line.ends_with('\n') {
-                err_buf.push('\n');
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !data_complete
+                    && stall_complete(last_progress_at, bytes_total, bytes_done, last_percent)
+                {
+                    on_progress(make_progress(
+                        bytes_done,
+                        bytes_total,
+                        rate_bps,
+                        last_percent,
+                        true,
+                    ));
+                    return Ok(finish_transfer_early(
+                        child,
+                        rx,
+                        bytes_done,
+                        bytes_total,
+                        rate_bps,
+                        on_progress,
+                    ));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                streams_done = 2;
+            }
+        }
+
+        if child_status.is_none() {
+            child_status = child.try_wait().context("try_wait")?;
+        }
+        if child_status.is_some() && exited_at.is_none() {
+            exited_at = Some(Instant::now());
+        }
+
+        let pipes_settled = streams_done >= 2
+            || exited_at.is_some_and(|t| t.elapsed() > Duration::from_millis(250));
+        if child_status.is_some() && pipes_settled {
+            break;
+        }
+    }
+
+    // Drain any trailing progress/error lines briefly after exit.
+    if streams_done < 2 {
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(RsyncChunk::Done) => {
+                    streams_done = streams_done.saturating_add(1);
+                    if streams_done >= 2 {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(RsyncChunk::ErrText(line)) => {
+                    err_buf.push_str(&line);
+                    if !line.ends_with('\n') {
+                        err_buf.push('\n');
+                    }
+                }
+                Ok(RsyncChunk::ProgressLine(line)) => {
+                    if let Some(parsed) = parse_progress2(&line) {
+                        bytes_done = parsed.bytes_done;
+                        if let Some(r) = parsed.bytes_per_sec {
+                            rate_bps = Some(r);
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
     }
 
-    let status = child.wait().context("wait")?;
+    let status = match child_status {
+        Some(s) => s,
+        None => child.wait().context("wait")?,
+    };
     let cancelled = cancel.load(Ordering::SeqCst);
 
     if cancelled {
@@ -934,6 +1093,8 @@ fn watch_child(
         message: "Done".into(),
         bytes_per_sec: rate_bps,
         eta_secs: Some(0),
+        percent: Some(100.0),
+        data_complete: true,
     });
     Ok(TransferResult {
         bytes_transferred: bytes_done,
@@ -942,22 +1103,136 @@ fn watch_child(
     })
 }
 
-fn make_progress(bytes_done: u64, bytes_total: Option<u64>, rate_bps: Option<f64>) -> Progress {
-    let eta_secs = match (bytes_total, rate_bps) {
-        (Some(total), Some(rate)) if rate > 1.0 && total > bytes_done => {
-            Some(((total - bytes_done) as f64 / rate).ceil() as u64)
+/// Keep draining pipes and reap the child without blocking the transfer thread.
+fn finish_transfer_early(
+    child: Child,
+    rx: mpsc::Receiver<RsyncChunk>,
+    bytes_done: u64,
+    bytes_total: Option<u64>,
+    rate_bps: Option<f64>,
+    on_progress: &impl Fn(Progress),
+) -> TransferResult {
+    let bytes_done = bytes_total
+        .map(|total| bytes_done.max(total))
+        .unwrap_or(bytes_done);
+    on_progress(Progress {
+        bytes_done,
+        bytes_total,
+        current_file: None,
+        indeterminate: false,
+        message: "Done".into(),
+        bytes_per_sec: rate_bps,
+        eta_secs: Some(0),
+        percent: Some(100.0),
+        data_complete: true,
+    });
+    reap_child_in_background(child, rx);
+    TransferResult {
+        bytes_transferred: bytes_done,
+        cancelled: false,
+        message: "OK".into(),
+    }
+}
+
+fn transfer_data_complete(
+    parsed: &ParsedProgress,
+    bytes_total: Option<u64>,
+    bytes_done: u64,
+) -> bool {
+    if parsed.percent.is_some_and(|p| p >= 100) {
+        return true;
+    }
+    if parsed.to_chk.is_some_and(|(left, _)| left == 0) {
+        return true;
+    }
+    if let Some(total) = bytes_total {
+        if total > 0 && bytes_done >= total {
+            return parsed.percent.is_some_and(|p| p >= 95);
         }
-        (Some(total), _) if total <= bytes_done => Some(0),
-        _ => None,
+    }
+    false
+}
+
+fn stall_complete(
+    last_progress_at: Instant,
+    bytes_total: Option<u64>,
+    bytes_done: u64,
+    last_percent: Option<f32>,
+) -> bool {
+    if last_progress_at.elapsed() < Duration::from_millis(1200) {
+        return false;
+    }
+    if last_percent.is_some_and(|p| p >= 99.0) {
+        return true;
+    }
+    if let Some(total) = bytes_total {
+        if total > 0 && bytes_done as f64 >= total as f64 * 0.95 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Keep draining pipes and wait for the child so SSH teardown cannot stall the UI,
+/// and so a full pipe buffer cannot deadlock the still-running process.
+fn reap_child_in_background(mut child: Child, rx: mpsc::Receiver<RsyncChunk>) {
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if child.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
+                    // Payload is done; don't wait forever for SSH/rsync teardown.
+                    if started.elapsed() > Duration::from_secs(3) {
+                        let _ = child.kill();
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let drain_until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < drain_until {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let _ = child.wait();
+    });
+}
+
+fn make_progress(
+    bytes_done: u64,
+    bytes_total: Option<u64>,
+    rate_bps: Option<f64>,
+    percent: Option<f32>,
+    data_complete: bool,
+) -> Progress {
+    let eta_secs = if data_complete {
+        Some(0)
+    } else {
+        match (bytes_total, rate_bps) {
+            (Some(total), Some(rate)) if rate > 1.0 && total > bytes_done => {
+                Some(((total - bytes_done) as f64 / rate).ceil() as u64)
+            }
+            (Some(total), _) if total <= bytes_done => Some(0),
+            _ => None,
+        }
     };
     Progress {
         bytes_done,
         bytes_total,
         current_file: None,
-        indeterminate: bytes_total.is_none(),
+        indeterminate: bytes_total.is_none() && percent.is_none(),
         message: String::new(),
         bytes_per_sec: rate_bps,
         eta_secs,
+        percent,
+        data_complete,
     }
 }
 
@@ -985,16 +1260,7 @@ fn drain_rsync_stream(mut stream: impl Read, kind: StreamKind, tx: mpsc::Sender<
                         if !acc.is_empty() {
                             let line = String::from_utf8_lossy(&acc).into_owned();
                             acc.clear();
-                            let _ = match kind {
-                                StreamKind::Stderr => {
-                                    if parse_progress2(&line).is_some() {
-                                        tx.send(RsyncChunk::ProgressLine(line))
-                                    } else {
-                                        tx.send(RsyncChunk::ErrText(line))
-                                    }
-                                }
-                                StreamKind::Stdout => tx.send(RsyncChunk::ProgressLine(line)),
-                            };
+                            let _ = emit_rsync_line(kind, line, &tx);
                         }
                     } else {
                         acc.push(b);
@@ -1006,23 +1272,37 @@ fn drain_rsync_stream(mut stream: impl Read, kind: StreamKind, tx: mpsc::Sender<
     }
     if !acc.is_empty() {
         let line = String::from_utf8_lossy(&acc).into_owned();
-        let _ = match kind {
-            StreamKind::Stderr if parse_progress2(&line).is_none() => {
-                tx.send(RsyncChunk::ErrText(line))
-            }
-            _ => tx.send(RsyncChunk::ProgressLine(line)),
-        };
+        let _ = emit_rsync_line(kind, line, &tx);
     }
     let _ = tx.send(RsyncChunk::Done);
+}
+
+fn emit_rsync_line(
+    kind: StreamKind,
+    line: String,
+    tx: &mpsc::Sender<RsyncChunk>,
+) -> Result<(), mpsc::SendError<RsyncChunk>> {
+    match kind {
+        // progress2 lands on stdout for modern rsync; still accept it on stderr.
+        StreamKind::Stdout | StreamKind::Stderr if parse_progress2(&line).is_some() => {
+            tx.send(RsyncChunk::ProgressLine(line))
+        }
+        StreamKind::Stderr => tx.send(RsyncChunk::ErrText(line)),
+        StreamKind::Stdout => Ok(()), // ignore non-progress stdout
+    }
 }
 
 struct ParsedProgress {
     bytes_done: u64,
     bytes_per_sec: Option<f64>,
+    percent: Option<u32>,
+    /// Remaining / total from `(xfr#…, to-chk=A/B)` or `ir-chk=A/B`.
+    to_chk: Option<(u64, u64)>,
 }
 
 /// Parse rsync `--info=progress2` lines like:
 /// `  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=3/10)`
+/// Note: modern rsync writes these to **stdout** when not a TTY.
 fn parse_progress2(line: &str) -> Option<ParsedProgress> {
     let t = line.trim();
     if t.is_empty() {
@@ -1038,18 +1318,45 @@ fn parse_progress2(line: &str) -> Option<ParsedProgress> {
         return None;
     }
     let bytes_done = digits.parse().ok()?;
-    // Skip percent token if present, then look for a *B/s rate.
     let mut bytes_per_sec = None;
+    let mut percent = None;
     for tok in parts {
-        if let Some(rate) = parse_rate_token(tok) {
-            bytes_per_sec = Some(rate);
-            break;
+        if percent.is_none() {
+            if let Some(p) = tok.strip_suffix('%') {
+                if let Ok(v) = p.parse::<u32>() {
+                    percent = Some(v);
+                    continue;
+                }
+            }
+        }
+        if bytes_per_sec.is_none() {
+            if let Some(rate) = parse_rate_token(tok) {
+                bytes_per_sec = Some(rate);
+            }
         }
     }
+    let to_chk = parse_chk_token(t);
     Some(ParsedProgress {
         bytes_done,
         bytes_per_sec,
+        percent,
+        to_chk,
     })
+}
+
+fn parse_chk_token(line: &str) -> Option<(u64, u64)> {
+    for key in ["to-chk=", "ir-chk="] {
+        if let Some(pos) = line.find(key) {
+            let rest = &line[pos + key.len()..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit() && c != '/')
+                .unwrap_or(rest.len());
+            let pair = &rest[..end];
+            let (a, b) = pair.split_once('/')?;
+            return Some((a.parse().ok()?, b.parse().ok()?));
+        }
+    }
+    None
 }
 
 fn parse_rate_token(tok: &str) -> Option<f64> {
@@ -1100,12 +1407,24 @@ mod tests {
         .unwrap();
         assert_eq!(p.bytes_done, 1_048_576);
         assert!((p.bytes_per_sec.unwrap() - 10.0 * 1024.0 * 1024.0).abs() < 1.0);
+        assert_eq!(p.percent, Some(50));
+        assert_eq!(p.to_chk, Some((0, 1)));
     }
 
     #[test]
     fn parse_progress_cr_style() {
         let n = parse_progress2_line("    12345  10%  1.00MB/s    0:00:01");
         assert_eq!(n, Some(12345));
+    }
+
+    #[test]
+    fn parse_ir_chk() {
+        let p = parse_progress2(
+            "  999 100%  1.00MB/s    0:00:01 (xfr#2, ir-chk=12/40)",
+        )
+        .unwrap();
+        assert_eq!(p.percent, Some(100));
+        assert_eq!(p.to_chk, Some((12, 40)));
     }
 
     #[test]
