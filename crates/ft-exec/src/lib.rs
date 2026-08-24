@@ -1,10 +1,11 @@
 //! SSH + Homebrew rsync orchestration (no filenames logged).
 
 use anyhow::{bail, Context, Result};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -559,6 +560,12 @@ fn write_files_from_list(relatives: &[String]) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn rsync_common_args(cmd: &mut Command) {
+    cmd.arg("-a")
+        .arg("--inplace") // write destination in place (no .<name>.XXXXXX temp + rename)
+        .arg("--info=progress2");
+}
+
 fn run_rsync_local_client(
     plan: &TransferPlan,
     rsync: &Path,
@@ -567,11 +574,8 @@ fn run_rsync_local_client(
     on_progress: &impl Fn(Progress),
 ) -> Result<TransferResult> {
     let mut cmd = Command::new(rsync);
-    cmd.arg("-a")
-        .arg("--info=progress2")
-        .arg("--out-format=%n")
-        .arg("--files-from")
-        .arg(files_from);
+    rsync_common_args(&mut cmd);
+    cmd.arg("--files-from").arg(files_from);
 
     // Trailing slash semantics: base paths as roots for relative files-from.
     let src = match plan.mode {
@@ -670,7 +674,7 @@ fn run_remote_orchestrated(
          {body}",
         body = if push {
             format!(
-                "\"$RSYNC\" -a --info=progress2 --files-from={list} -e {ssh_e} \
+                "\"$RSYNC\" -a --inplace --info=progress2 --files-from={list} -e {ssh_e} \
                  --rsync-path={rpath} {src}/ {peer}:{dst}/; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
                 ssh_e = shell_quote(&ssh_e),
@@ -681,7 +685,7 @@ fn run_remote_orchestrated(
             )
         } else {
             format!(
-                "\"$RSYNC\" -a --info=progress2 --files-from={list} -e {ssh_e} \
+                "\"$RSYNC\" -a --inplace --info=progress2 --files-from={list} -e {ssh_e} \
                  --rsync-path={rpath} {peer}:{src}/ {dst}/; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
                 ssh_e = shell_quote(&ssh_e),
@@ -715,53 +719,61 @@ fn watch_child(
         while !cancel_watcher.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
         }
-        let _ = Command::new("kill").arg(pid_hint.to_string()).status();
+        let _ = Command::new("kill").arg(pid_hint.to_string()).output();
     });
+
+    // progress2 goes to stderr and uses \r. Must drain both pipes or rsync blocks.
+    let (tx, rx) = mpsc::channel::<RsyncChunk>();
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || drain_rsync_stream(stdout, StreamKind::Stdout, tx));
+    }
+    {
+        let tx = tx;
+        std::thread::spawn(move || drain_rsync_stream(stderr, StreamKind::Stderr, tx));
+    }
 
     let mut bytes_done = 0u64;
-    let mut last_file: Option<String> = None;
+    let mut err_buf = String::new();
 
-    let err_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
-            s.push_str(&line);
-            s.push('\n');
-        }
-        s
-    });
-
-    let reader = BufReader::new(stdout);
-    for line in reader.lines().flatten() {
+    while let Ok(chunk) = rx.recv() {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        if let Some(p) = parse_progress2_line(&line) {
-            bytes_done = p;
-            on_progress(Progress {
-                bytes_done,
-                bytes_total,
-                current_file: last_file.clone(),
-                indeterminate: bytes_total.is_none(),
-                message: String::new(),
-            });
-        } else if !line.trim().is_empty()
-            && !line.contains('%')
-            && !line.chars().next().is_some_and(|c| c.is_ascii_digit())
-        {
-            // Likely --out-format filename (ephemeral UI only).
-            last_file = Some(line);
-            on_progress(Progress {
-                bytes_done,
-                bytes_total,
-                current_file: last_file.clone(),
-                indeterminate: bytes_total.is_none(),
-                message: String::new(),
-            });
+        match chunk {
+            RsyncChunk::ProgressLine(line) => {
+                if let Some(p) = parse_progress2_line(&line) {
+                    bytes_done = p;
+                    on_progress(Progress {
+                        bytes_done,
+                        bytes_total,
+                        current_file: None,
+                        indeterminate: bytes_total.is_none(),
+                        message: String::new(),
+                    });
+                }
+            }
+            RsyncChunk::ErrText(s) => {
+                if let Some(p) = parse_progress2_line(&s) {
+                    bytes_done = p;
+                    on_progress(Progress {
+                        bytes_done,
+                        bytes_total,
+                        current_file: None,
+                        indeterminate: bytes_total.is_none(),
+                        message: String::new(),
+                    });
+                } else if !s.trim().is_empty() {
+                    err_buf.push_str(&s);
+                    if !s.ends_with('\n') {
+                        err_buf.push('\n');
+                    }
+                }
+            }
+            RsyncChunk::Done => {}
         }
     }
 
-    let err_buf = err_handle.join().unwrap_or_default();
     let status = child.wait().context("wait")?;
     let cancelled = cancel.load(Ordering::SeqCst);
 
@@ -773,7 +785,6 @@ fn watch_child(
         });
     }
     if !status.success() {
-        // Strip likely path-looking segments from stderr for privacy in returned message.
         let summary = sanitize_error(&err_buf);
         bail!("transfer failed: {summary}");
     }
@@ -794,10 +805,66 @@ fn watch_child(
     })
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamKind {
+    Stdout,
+    Stderr,
+}
+
+enum RsyncChunk {
+    ProgressLine(String),
+    ErrText(String),
+    Done,
+}
+
+fn drain_rsync_stream(mut stream: impl Read, kind: StreamKind, tx: mpsc::Sender<RsyncChunk>) {
+    let mut buf = [0u8; 4096];
+    let mut acc = Vec::new();
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                for &b in &buf[..n] {
+                    if b == b'\r' || b == b'\n' {
+                        if !acc.is_empty() {
+                            let line = String::from_utf8_lossy(&acc).into_owned();
+                            acc.clear();
+                            let _ = match kind {
+                                StreamKind::Stderr => {
+                                    // progress2 lives on stderr; also keep non-progress for errors
+                                    if parse_progress2_line(&line).is_some() {
+                                        tx.send(RsyncChunk::ProgressLine(line))
+                                    } else {
+                                        tx.send(RsyncChunk::ErrText(line))
+                                    }
+                                }
+                                StreamKind::Stdout => tx.send(RsyncChunk::ProgressLine(line)),
+                            };
+                        }
+                    } else {
+                        acc.push(b);
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if !acc.is_empty() {
+        let line = String::from_utf8_lossy(&acc).into_owned();
+        let _ = match kind {
+            StreamKind::Stderr if parse_progress2_line(&line).is_none() => {
+                tx.send(RsyncChunk::ErrText(line))
+            }
+            _ => tx.send(RsyncChunk::ProgressLine(line)),
+        };
+    }
+    let _ = tx.send(RsyncChunk::Done);
+}
+
 /// Parse rsync `--info=progress2` lines like:
 /// `  1,234,567  45%  12.34MB/s    0:00:01 (xfr#1, to-chk=3/10)`
 pub fn parse_progress2_line(line: &str) -> Option<u64> {
-    let t = line.trim_start();
+    let t = line.trim();
     if t.is_empty() {
         return None;
     }
@@ -806,15 +873,19 @@ pub fn parse_progress2_line(line: &str) -> Option<u64> {
     if digits.is_empty() {
         return None;
     }
-    // progress2 lines usually include % later
-    if !line.contains('%') && !line.contains("xfr#") {
+    // progress2 lines usually include % or xfr#
+    if !t.contains('%') && !t.contains("xfr#") {
         return None;
     }
     digits.parse().ok()
 }
 
 fn sanitize_error(stderr: &str) -> String {
-    let line = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(stderr);
+    let line = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(stderr);
     let mut s = line.trim().to_string();
     if s.len() > 200 {
         s.truncate(200);
@@ -833,6 +904,12 @@ mod tests {
             "  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=0/1)",
         );
         assert_eq!(n, Some(1_048_576));
+    }
+
+    #[test]
+    fn parse_progress_cr_style() {
+        let n = parse_progress2_line("    12345  10%  1.00MB/s    0:00:01");
+        assert_eq!(n, Some(12345));
     }
 
     #[test]
