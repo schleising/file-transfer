@@ -364,6 +364,120 @@ pub fn path_exists(host: &HostRef, path: &Path) -> Result<bool> {
     Ok(cmd.status()?.success())
 }
 
+fn path_is_dir(host: &HostRef, path: &Path) -> Result<bool> {
+    if host.is_local {
+        return Ok(path.is_dir());
+    }
+    let q = shell_quote(&path.to_string_lossy());
+    let mut cmd = ssh_base(host);
+    cmd.arg(format!("test -d {q}"));
+    Ok(cmd.status()?.success())
+}
+
+/// Expand selected entries so directories become their contained file paths.
+/// `--files-from` alone often creates empty dirs unless every file is listed (or -r is
+/// honored consistently); expanding is reliable across local/remote rsync.
+pub fn expand_selection(host: &HostRef, base: &Path, relatives: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for rel in relatives {
+        let rel = rel.trim_end_matches('/').to_string();
+        if rel.is_empty() || rel == "." {
+            continue;
+        }
+        let full = base.join(&rel);
+        if path_is_dir(host, &full)? {
+            let mut files = list_files_under(host, base, &rel)?;
+            if files.is_empty() {
+                // Keep empty directory in the transfer set.
+                out.push(rel);
+            } else {
+                files.sort();
+                out.append(&mut files);
+            }
+        } else {
+            out.push(rel);
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+fn list_files_under(host: &HostRef, base: &Path, rel_dir: &str) -> Result<Vec<String>> {
+    if host.is_local {
+        let root = base.join(rel_dir);
+        let mut out = Vec::new();
+        for file in walkdir_files(&root)? {
+            let rel = file
+                .strip_prefix(base)
+                .with_context(|| format!("strip {}", base.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(rel);
+        }
+        return Ok(out);
+    }
+    list_files_under_remote(host, base, rel_dir)
+}
+
+fn list_files_under_remote(host: &HostRef, base: &Path, rel_dir: &str) -> Result<Vec<String>> {
+    let base_q = shell_quote(&base.to_string_lossy());
+    let rel_q = shell_quote(rel_dir);
+    let inner = format!(
+        r#"
+set +e
+base={base_q}
+rel={rel_q}
+root="$base/$rel"
+if [ ! -d "$root" ]; then
+  echo "not a directory: $root" >&2
+  exit 2
+fi
+if command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1; then PY=python
+else PY=
+fi
+if [ -n "$PY" ]; then
+  exec "$PY" -c '
+import os, sys
+base, rel = sys.argv[1], sys.argv[2]
+root = os.path.join(base, rel)
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+    for name in filenames:
+        if name.startswith("."):
+            continue
+        full = os.path.join(dirpath, name)
+        print(os.path.relpath(full, base).replace(os.sep, "/"))
+' "$base" "$rel"
+fi
+# find fallback
+find "$root" -type f ! -path "*/.*" -print 2>/dev/null | while IFS= read -r f; do
+  printf "%s\n" "${{f#"$base"/}}"
+done
+"#,
+        base_q = base_q,
+        rel_q = rel_q
+    );
+    let remote = format!("bash -c {}", shell_quote(&inner));
+    let mut cmd = ssh_base(host);
+    cmd.arg(remote);
+    let out = cmd.output().context("ssh list files under dir")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("expand folder failed: {}", err.trim());
+    }
+    let mut files = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let p = line.trim();
+        if p.is_empty() || p.starts_with('.') || p.contains("/.") {
+            continue;
+        }
+        files.push(p.to_string());
+    }
+    Ok(files)
+}
+
 /// Sum sizes for selected relative paths under base.
 pub fn preflight_size(host: &HostRef, base: &Path, relatives: &[String]) -> Result<(u64, u64)> {
     if relatives.is_empty() {
@@ -462,6 +576,9 @@ pub fn plan_transfer(
     dest_base: PathBuf,
     relative_paths: Vec<String>,
 ) -> Result<TransferPlan> {
+    let relative_paths = expand_selection(&source, &source_base, &relative_paths)
+        .unwrap_or(relative_paths);
+
     let (bytes_total, file_count) =
         match preflight_size(&source, &source_base, &relative_paths) {
             Ok(v) => (Some(v.0), v.1),
@@ -533,7 +650,17 @@ pub fn run_transfer(
 ) -> Result<TransferResult> {
     preflight_start(plan)?;
     let rsync = find_homebrew_rsync()?;
-    let files_from = write_files_from_list(&plan.relative_paths)?;
+    // Re-expand in case plan was built without expansion; ensures folder contents transfer.
+    let paths = expand_selection(&plan.source, &plan.source_base, &plan.relative_paths)
+        .unwrap_or_else(|_| plan.relative_paths.clone());
+    if paths.is_empty() {
+        bail!("nothing to transfer after expanding folders");
+    }
+    let files_from = write_files_from_list(&paths)?;
+
+    let mut plan = plan.clone();
+    plan.relative_paths = paths;
+    let plan = &plan;
 
     let result = match plan.mode {
         TransferMode::LocalCopy | TransferMode::LocalToRemote | TransferMode::RemoteToLocal => {
@@ -562,6 +689,7 @@ fn write_files_from_list(relatives: &[String]) -> Result<PathBuf> {
 
 fn rsync_common_args(cmd: &mut Command) {
     cmd.arg("-a")
+        .arg("-r") // explicit: with --files-from, ensure directories are scanned
         .arg("--inplace") // write destination in place (no .<name>.XXXXXX temp + rename)
         .arg("--info=progress2");
 }
@@ -674,7 +802,7 @@ fn run_remote_orchestrated(
          {body}",
         body = if push {
             format!(
-                "\"$RSYNC\" -a --inplace --info=progress2 --files-from={list} -e {ssh_e} \
+                "\"$RSYNC\" -a -r --inplace --info=progress2 --files-from={list} -e {ssh_e} \
                  --rsync-path={rpath} {src}/ {peer}:{dst}/; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
                 ssh_e = shell_quote(&ssh_e),
@@ -685,7 +813,7 @@ fn run_remote_orchestrated(
             )
         } else {
             format!(
-                "\"$RSYNC\" -a --inplace --info=progress2 --files-from={list} -e {ssh_e} \
+                "\"$RSYNC\" -a -r --inplace --info=progress2 --files-from={list} -e {ssh_e} \
                  --rsync-path={rpath} {peer}:{src}/ {dst}/; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
                 ssh_e = shell_quote(&ssh_e),
