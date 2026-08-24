@@ -118,7 +118,9 @@ pub fn card_frame() -> egui::Frame {
 }
 
 pub fn section_heading(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
+    crate::widgets::constrain_content(ui);
     ui.vertical(|ui| {
+        crate::widgets::constrain_content(ui);
         ui.label(
             egui::RichText::new(title)
                 .size(20.0)
@@ -127,7 +129,8 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
         );
         if let Some(sub) = subtitle {
             ui.add_space(2.0);
-            ui.label(
+            crate::widgets::wrapped_label(
+                ui,
                 egui::RichText::new(sub)
                     .size(13.0)
                     .color(colors::TEXT_SECONDARY),
@@ -141,7 +144,9 @@ pub fn card_section<R>(
     title: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    crate::widgets::constrain_content(ui);
     card_frame().show(ui, |ui| {
+        crate::widgets::constrain_content(ui);
         ui.label(
             egui::RichText::new(title)
                 .size(14.0)

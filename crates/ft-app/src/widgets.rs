@@ -98,9 +98,11 @@ pub fn progress_footer(
     status_line: &str,
     on_cancel: impl FnOnce(),
 ) {
-    ui.horizontal(|ui| {
+    constrain_content(ui);
+    ui.horizontal_wrapped(|ui| {
+        constrain_content(ui);
         ui.vertical(|ui| {
-            ui.set_min_width(ui.available_width() - 100.0);
+            constrain_content(ui);
 
             let status = if !status_line.is_empty() {
                 status_line.to_string()
@@ -111,6 +113,7 @@ pub fn progress_footer(
             };
 
             ui.horizontal(|ui| {
+                constrain_content(ui);
                 if transferring {
                     ui.spinner();
                     ui.add_space(4.0);
@@ -121,8 +124,9 @@ pub fn progress_footer(
                     Icon::Xmark.ui(ui, colors::ERROR);
                     ui.add_space(2.0);
                 }
-                ui.label(
-                    RichText::new(&status)
+                wrapped_label(
+                    ui,
+                    RichText::new(status)
                         .size(13.0)
                         .color(colors::TEXT_PRIMARY),
                 );
@@ -133,16 +137,15 @@ pub fn progress_footer(
         });
 
         if transferring {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if secondary_button(ui, "Cancel").clicked() {
-                    on_cancel();
-                }
-            });
+            if secondary_button(ui, "Cancel").clicked() {
+                on_cancel();
+            }
         }
     });
 }
 
 fn progress_bar(ui: &mut Ui, progress: &Progress, transferring: bool) {
+    constrain_content(ui);
     let rate_eta = {
         let mut parts = Vec::new();
         if let Some(rate) = progress.bytes_per_sec.filter(|r| *r > 0.0) {
@@ -173,31 +176,6 @@ fn progress_bar(ui: &mut Ui, progress: &Progress, transferring: bool) {
         }
     };
 
-    let bar_height = 8.0;
-    let (rect, _response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), bar_height + 18.0),
-        egui::Sense::hover(),
-    );
-
-    let track = egui::Rect::from_min_size(
-        rect.min + Vec2::new(0.0, 16.0),
-        Vec2::new(rect.width(), bar_height),
-    );
-    ui.painter()
-        .rect_filled(track, bar_height * 0.5, colors::PROGRESS_TRACK);
-
-    let fill_w = if frac < 0.0 {
-        let pulse = (ui.input(|i| i.time) * 2.0).sin() * 0.5 + 0.5;
-        track.width() * (0.25 + pulse as f32 * 0.35)
-    } else {
-        track.width() * frac
-    };
-    if fill_w > 0.5 {
-        let fill = egui::Rect::from_min_size(track.min, Vec2::new(fill_w, bar_height));
-        ui.painter()
-            .rect_filled(fill, bar_height * 0.5, colors::PROGRESS_FILL);
-    }
-
     let detail = if frac < 0.0 {
         format!("{}{}", format_bytes(progress.bytes_done), rate_eta)
     } else {
@@ -215,13 +193,77 @@ fn progress_bar(ui: &mut Ui, progress: &Progress, transferring: bool) {
         }
     };
 
-    ui.painter().text(
-        rect.min,
-        egui::Align2::LEFT_TOP,
-        detail,
-        egui::FontId::new(11.5, egui::FontFamily::Proportional),
+    let bar_height = 8.0;
+    let font = egui::FontId::new(11.5, egui::FontFamily::Proportional);
+    let galley = ui.painter().layout(
+        detail.clone(),
+        font.clone(),
         colors::TEXT_SECONDARY,
+        ui.available_width(),
     );
+    let detail_height = galley.size().y;
+    let (rect, _response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), detail_height + bar_height + 6.0),
+        egui::Sense::hover(),
+    );
+    ui.painter().galley(rect.min, galley, colors::TEXT_SECONDARY);
+
+    let track = egui::Rect::from_min_size(
+        rect.min + Vec2::new(0.0, detail_height + 4.0),
+        Vec2::new(rect.width(), bar_height),
+    );
+    ui.painter()
+        .rect_filled(track, bar_height * 0.5, colors::PROGRESS_TRACK);
+
+    let fill_w = if frac < 0.0 {
+        let pulse = (ui.input(|i| i.time) * 2.0).sin() * 0.5 + 0.5;
+        track.width() * (0.25 + pulse as f32 * 0.35)
+    } else {
+        track.width() * frac
+    };
+    if fill_w > 0.5 {
+        let fill = egui::Rect::from_min_size(track.min, Vec2::new(fill_w, bar_height));
+        ui.painter()
+            .rect_filled(fill, bar_height * 0.5, colors::PROGRESS_FILL);
+    }
+}
+
+pub fn constrain_content(ui: &mut Ui) {
+    let w = ui.available_width();
+    if w.is_finite() && w > 0.0 {
+        ui.set_max_width(w);
+    }
+}
+
+pub fn wrapped_label(ui: &mut Ui, text: impl Into<RichText>) {
+    constrain_content(ui);
+    ui.add(egui::Label::new(text.into()).wrap());
+}
+
+pub fn page_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    constrain_content(ui);
+    egui::ScrollArea::vertical()
+        .id_salt("page_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            constrain_content(ui);
+            add_contents(ui)
+        })
+        .inner
+}
+
+pub fn path_field(ui: &mut Ui, text: &mut String, hint: &str) -> egui::Response {
+    constrain_content(ui);
+    let w = ui.available_width().max(96.0);
+    ui.add(
+        egui::TextEdit::singleline(text)
+            .desired_width(w)
+            .hint_text(hint),
+    )
+}
+
+pub fn combo_width(ui: &Ui) -> f32 {
+    ui.available_width().max(120.0)
 }
 
 pub fn primary_button(ui: &mut Ui, label: &str) -> egui::Response {
@@ -233,6 +275,14 @@ pub fn primary_button(ui: &mut Ui, label: &str) -> egui::Response {
             .corner_radius(egui::CornerRadius::same(8))
             .min_size(Vec2::new(120.0, 32.0)),
     )
+}
+
+pub fn field_label(ui: &mut Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .size(12.0)
+            .color(colors::TEXT_SECONDARY),
+    );
 }
 
 pub fn secondary_button(ui: &mut Ui, label: &str) -> egui::Response {
@@ -250,34 +300,26 @@ pub fn secondary_button(ui: &mut Ui, label: &str) -> egui::Response {
 }
 
 pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> egui::Response {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         icon.ui(ui, colors::TEXT_SECONDARY);
-        ui.add_space(4.0);
         secondary_button(ui, label)
     })
     .inner
 }
 
-pub fn field_label(ui: &mut Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .size(12.0)
-            .color(colors::TEXT_SECONDARY),
-    );
-}
-
 pub fn status_message(ui: &mut Ui, result: &Result<String, String>) {
+    constrain_content(ui);
     match result {
         Ok(m) => {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 Icon::Checkmark.ui(ui, colors::SUCCESS);
-                ui.label(RichText::new(m).color(colors::SUCCESS));
+                wrapped_label(ui, RichText::new(m).color(colors::SUCCESS));
             });
         }
         Err(e) => {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 Icon::Xmark.ui(ui, colors::ERROR);
-                ui.label(RichText::new(e).color(colors::ERROR));
+                wrapped_label(ui, RichText::new(e).color(colors::ERROR));
             });
         }
     }
