@@ -38,7 +38,7 @@ Source and/or destination may be the controller Mac itself.
 
 1. Run the GUI on one Mac and transfer files from a second computer to a third.
 2. Persist known computers for quick selection.
-3. Persist known locations (folders) for quick selection.
+3. Persist known **locations** (host + folder path) for quick selection on the Transfer tab.
 4. List files in a source location for selection (multi-select; folders as units).
 5. Select a single destination location.
 6. Allow source or destination to be the controller Mac.
@@ -107,7 +107,8 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 ### Remotes
 
 - Transport: **rsync over SSH** only.
-- Peer and controller SSH options include `BatchMode=yes`, `ConnectTimeout=8`, `StrictHostKeyChecking=accept-new`, `UpdateHostKeys=yes`.
+- Peer and controller SSH options include `BatchMode=yes`, `ConnectTimeout=8`, `StrictHostKeyChecking=accept-new`, `UpdateHostKeys=no`, `ControlMaster=no`, `ControlPath=none`. One-shot controller SSH uses `-n` (stdin closed); rsync `-e ssh` does **not** use `-n` (protocol needs stdin).
+- Remote orchestration SSH adds `-tt` so rsync progress is line-flushed through the session; remote rsync uses `stdbuf -oL` when available.
 - Remote Mac rsync: prefer Homebrew paths when resolving the client on that host; `--rsync-path=rsync` for the server side of a hop (PATH / package on Linux).
 
 ### Trust and startup
@@ -130,7 +131,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 ### Tabs
 
-1. **Transfer** — computers, folders, file multi-select, progress, Start/Cancel, Check access.
+1. **Transfer** — source/dest location pickers, file multi-select, progress (rate/ETA), Start/Cancel, Check access.
 2. **Computers** — CRUD, Test SSH, Bonjour discoveries.
 3. **Locations** — saved folders per computer.
 4. **History** — job metadata only (no filenames).
@@ -142,15 +143,18 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 | This Mac | Native folder dialog (`rfd`) |
 | Remote | In-app SSH folder browser (list dirs, Up / Home / Go, Select this folder) |
 
-Also: type path + **Use path**; optional **Saved…** dropdown of stored locations.
+**Locations** are stored as a **computer + folder path** pair. On the Transfer tab, source and destination each have a single quick-select dropdown listing all saved locations as **`Host — Folder (path)`** (not a two-step “pick computer, then pick saved folder”). Selecting an entry sets both the host and folder.
+
+To add or change a path: choose **Browse on** (host picker) → **Browse…** or type a path → **Use path**. New paths are saved as locations and appear in the dropdown. The **Locations** tab still supports explicit CRUD.
 
 ### Transfer flow
 
-1. Source computer → source folder (Browse / path / saved) → **List**.
+1. **Source** — pick a saved location (or browse / type path) → **List**.
 2. Multi-select files and/or folders (dotfiles hidden in listings).
-3. Destination computer → one destination folder.
-4. **Check access** → **Start transfer** → progress bar; **Cancel** kills the local ssh/rsync child.
-5. History records counts/bytes/status only.
+3. **Destination** — pick a saved location (or browse / type path).
+4. **Check access** → **Start transfer** → progress bar with rate and ETA; **Cancel** kills the local ssh/rsync child.
+5. UI shows **Transfer complete** as soon as rsync reports payload done (see §8); SSH teardown continues in the background.
+6. History records counts/bytes/status only.
 
 ### Soft-fail access
 
@@ -179,7 +183,8 @@ Controller must not run `rsync A:… B:…` (that relays via the Mac).
 
 - `-a -r` — archive + explicit recurse.
 - `--inplace` — write the real destination path (no `.<name>.XXXXXX` temp then rename).
-- `--info=progress2` — aggregate progress (parsed from **stderr**, including `\r`-delimited updates).
+- `--info=progress2` — aggregate progress (parsed from **stdout** on Homebrew rsync 3.x when piped; `\r`-delimited updates).
+- `--outbuf=N` — disable block buffering when stdout/stderr are pipes (progress would otherwise flush only at exit).
 - `--files-from=` — exact selection; temp list deleted after the job; never stored in the DB.
 
 ### Folder selections
@@ -198,11 +203,14 @@ Relative structure under the destination folder is preserved.
 
 ## 8. Progress (as built)
 
-1. **Preflight** — size/count of the (expanded) selection when possible.
-2. **Bar** — `bytes_done / bytes_total` from parsed progress2; indeterminate if total unknown.
-3. **Stream handling** — drain **both** stdout and stderr; split on `\r` and `\n`. Failing to drain stderr filled the pipe and **blocked rsync mid-job** (often after the first file).
-4. UI repaints on a short interval while a transfer runs.
-5. Optional in-memory “current file” is not required for progress2; filenames are not persisted.
+1. **Preflight** — size/count of the (expanded) selection when possible (`bytes_total`, `file_count` on the job).
+2. **Bar** — prefers rsync’s own **percent** from progress2 when available; otherwise `bytes_done / bytes_total`. Shows **transfer rate** and **ETA** when parsed or derivable. Indeterminate animation if total unknown.
+3. **Parsing** — progress2 lines like `bytes  pct  rate  time (xfr#N, to-chk=L/T)`; extract bytes, percent, rate (`KB/s`/`MB/s`/…), and `to-chk` / `ir-chk` for completion detection.
+4. **Stream handling** — drain **both stdout and stderr**; split on `\r` and `\n`. On rsync 3.x with piped I/O, progress2 goes to **stdout** (not stderr). Failing to drain either pipe can **block rsync** (historically stderr; stdout null also caused stalls). Use `--outbuf=N` on the client.
+5. **Completion semantics** — payload is **done** when rsync reports any of: `100%`, `to-chk=0`, or progress stalls at ≥99% / ≥95% of preflight bytes for ~1.2s. The UI marks the job complete immediately (`data_complete`); the executor returns without waiting for SSH session teardown. A background thread keeps draining pipes and reaps the child (SIGKILL after a few seconds if stuck).
+6. **Remote→remote** — orchestration SSH uses `-tt`; remote script prefers `stdbuf -oL` around rsync so progress streams instead of buffering until session exit.
+7. UI repaints on background progress messages while a transfer runs.
+8. Filenames are not persisted; optional in-memory “current file” is not used for progress2.
 
 ### Cancel
 
@@ -282,8 +290,9 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 - Toolkit: **egui / eframe**.
 - Packaging: minimal `Info.plist` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
-- Transfer: Browse always visible; local vs remote picker behavior as in §6.
-- Start enabled when source/dest computers and locations are set and at least one entry is selected (preflight still required for a clean run).
+- Transfer: combined **host / folder** location dropdowns; separate **Browse on** host picker for native or SSH folder browse; path entry + **Use path** for ad-hoc locations.
+- Progress bar: percent (from rsync when available), bytes, rate, ETA; status line **Transfer complete** on payload done.
+- Start enabled when source/dest locations are set and at least one entry is selected (preflight still required for a clean run).
 
 ---
 
@@ -307,6 +316,8 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Discovery empty | OK | Manual hosts |
 | Size preflight fails | OK | Indeterminate progress allowed |
 | Stderr pipe not drained (historical bug) | — | Fixed: blocked after first file |
+| Stdout not drained / progress on stdout (rsync 3.x) | — | Fixed: pipe stdout; `--outbuf=N` |
+| Long pause at 100% waiting for SSH teardown | — | Fixed: complete on progress2 done; reap in background |
 | Missing Homebrew rsync on controller | OK | Local rsync ops fail with install hint |
 | Cancel | OK | Kill child; status cancelled |
 
@@ -321,7 +332,9 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Local ↔ remote ↔ remote→remote (push/pull) | Done |
 | Bonjour `_ssh._tcp` + save | Done |
 | Native + SSH folder browse | Done |
-| Progress2 parse + dual-stream drain + `--inplace` | Done |
+| Progress2 parse + dual-stream drain + `--inplace` + `--outbuf=N` | Done |
+| Progress rate/ETA + early UI completion on payload done | Done |
+| Transfer tab: combined host/folder location quick-select | Done |
 | Folder expand for `--files-from` | Done |
 | Install script → `/Applications` | Done |
 | Overwrite policy UI / df preflight / redacted command panel | Not in v1 |
@@ -331,7 +344,8 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 ## 16. Testing (manual / as used)
 
-- Multi-file and folder transfers with visible progress.
+- Multi-file and folder transfers with visible progress, rate, and ETA.
+- “Transfer complete” appears when payload finishes, not after SSH teardown.
 - Remote Mac and Linux listing (bash + Python).
 - Peer SSH with matching hostnames / `accept-new`.
 - Privacy: DB has no per-file names after jobs.
@@ -345,7 +359,8 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 |-------|---------------------|
 | GUI | **egui (eframe)** |
 | Remote→remote | Probe both; **prefer push** |
-| Progress | Preflight total + parse **progress2 from stderr** (`\r`); drain both pipes |
+| Progress | Preflight total + parse **progress2 from stdout** (`\r`); `--outbuf=N`; drain both pipes; rate/ETA; **complete UI on payload done** |
+| Locations (Transfer tab) | **Single dropdown per side**: `Host — Folder (path)`; browse/path adds saved locations |
 | DNS-SD | **`_ssh._tcp` only** |
 | App name / run mode | **File Transfer.app** in `/Applications` |
 | Distribution | Personal build; `scripts/install-app.sh` (no cargo-bundle, no notarization) |
@@ -353,7 +368,8 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Rsync write mode | **`--inplace`** |
 | Folder select | **Expand to file list** before `--files-from` |
 | Remote list | **Python preferred**; bash wrapper; hide `.*` in UI listings |
-| Peer SSH | Shared opts including **`StrictHostKeyChecking=accept-new`** |
+| Peer SSH | Shared opts including **`StrictHostKeyChecking=accept-new`**, **`UpdateHostKeys=no`**, **`ControlMaster=no`** |
+| Remote orchestration SSH | **`-tt`** + remote **`stdbuf -oL`** when available |
 
 ---
 
@@ -361,7 +377,8 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 - File Transfer.app on the controller Mac initiates transfers; Linux never needs the app.
 - A≠B≠C jobs move payload B↔C via rsync over SSH (push preferred).
-- Progress bar updates during multi-file jobs without stalling rsync.
-- Hosts/folders persist; filenames never stored.
+- Progress bar updates during multi-file jobs without stalling rsync; shows rate and ETA.
+- “Transfer complete” when rsync payload is done, not when SSH finishes closing.
+- Host/folder locations persist as combined entries; filenames never stored.
 - Broken SSH setup does not prevent startup.
 - Controller uses Homebrew rsync, not `/usr/bin/rsync`.
