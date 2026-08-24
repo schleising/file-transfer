@@ -40,6 +40,12 @@ enum BrowseTarget {
     LocationsForm,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Source,
+    Dest,
+}
+
 struct FolderBrowser {
     target: BrowseTarget,
     computer_id: Uuid,
@@ -254,11 +260,13 @@ impl FileTransferApp {
     fn apply_browsed_folder(&mut self, computer_id: Uuid, target: BrowseTarget, path: PathBuf) {
         match target {
             BrowseTarget::Source => {
-                self.source_location = Some(self.ensure_location(computer_id, path));
+                let id = self.ensure_location(computer_id, path);
+                self.apply_location_selection(Some(id), Side::Source);
                 self.start_list();
             }
             BrowseTarget::Dest => {
-                self.dest_location = Some(self.ensure_location(computer_id, path));
+                let id = self.ensure_location(computer_id, path);
+                self.apply_location_selection(Some(id), Side::Dest);
             }
             BrowseTarget::LocationsForm => {
                 if self.loc_name.trim().is_empty() {
@@ -560,6 +568,31 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
+fn format_rate(bps: f64) -> String {
+    if bps >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.2} GB/s", bps / (1024.0 * 1024.0 * 1024.0))
+    } else if bps >= 1024.0 * 1024.0 {
+        format!("{:.2} MB/s", bps / (1024.0 * 1024.0))
+    } else if bps >= 1024.0 {
+        format!("{:.1} KB/s", bps / 1024.0)
+    } else {
+        format!("{:.0} B/s", bps)
+    }
+}
+
+fn format_eta(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}h {m:02}m {s:02}s")
+    } else if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 impl eframe::App for FileTransferApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_bg();
@@ -741,29 +774,29 @@ impl FileTransferApp {
     fn ui_transfer(&mut self, ui: &mut egui::Ui) {
         ui.heading("Transfer");
 
-        ui.horizontal(|ui| {
-            ui.label("Source computer");
-            let mut src_c = self.source_computer;
-            Self::computer_combo_ui(ui, &self.computers, &mut src_c, "src_comp");
-            if src_c != self.source_computer {
-                self.source_computer = src_c;
-                self.source_location = None;
-                self.source_path_edit.clear();
-                self.entries.clear();
-                self.selected.clear();
-            }
-        });
-
         let mut list_after_pick = false;
         ui.horizontal(|ui| {
-            ui.label("Source folder");
-            let path_label = self
-                .source_location
-                .and_then(|id| self.location(id))
-                .map(|l| l.path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "(none selected)".into());
-            ui.monospace(&path_label);
+            ui.label("Source");
+            let mut src_l = self.source_location;
+            let changed = Self::location_combo_ui(
+                ui,
+                &self.computers,
+                &self.locations,
+                &mut src_l,
+                "src_loc",
+            );
+            if changed {
+                self.apply_location_selection(src_l, Side::Source);
+                list_after_pick = self.source_location.is_some();
+            }
 
+            ui.separator();
+            ui.label("Browse on");
+            let mut src_c = self.source_computer;
+            Self::computer_combo_ui(ui, &self.computers, &mut src_c, "src_browse_host");
+            if src_c != self.source_computer {
+                self.source_computer = src_c;
+            }
             if ui.button("Browse…").clicked() {
                 if let Some(cid) = self.source_computer {
                     self.open_folder_browse(cid, BrowseTarget::Source);
@@ -771,43 +804,19 @@ impl FileTransferApp {
             }
             ui.add(
                 egui::TextEdit::singleline(&mut self.source_path_edit)
-                    .desired_width(200.0)
+                    .desired_width(180.0)
                     .hint_text("or type path"),
             );
             if ui.button("Use path").clicked() {
                 let p = self.source_path_edit.trim();
                 if !p.is_empty() {
                     if let Some(cid) = self.source_computer {
-                        self.source_location = Some(self.ensure_location(cid, PathBuf::from(p)));
+                        let id = self.ensure_location(cid, PathBuf::from(p));
+                        self.apply_location_selection(Some(id), Side::Source);
                         list_after_pick = true;
                     }
                 }
             }
-
-            let saved: Vec<&Location> = self
-                .locations
-                .iter()
-                .filter(|l| Some(l.computer_id) == self.source_computer)
-                .collect();
-            if !saved.is_empty() {
-                let mut src_l = self.source_location;
-                let selected_text = src_l
-                    .and_then(|id| self.location(id))
-                    .map(|l| l.name.clone())
-                    .unwrap_or_else(|| "Saved…".into());
-                egui::ComboBox::from_id_salt("src_saved")
-                    .selected_text(selected_text)
-                    .show_ui(ui, |ui| {
-                        for l in &saved {
-                            ui.selectable_value(&mut src_l, Some(l.id), format!("{} — {}", l.name, l.path.display()));
-                        }
-                    });
-                if src_l != self.source_location {
-                    self.source_location = src_l;
-                    list_after_pick = true;
-                }
-            }
-
             if ui.button("List").clicked() {
                 list_after_pick = true;
             }
@@ -858,25 +867,26 @@ impl FileTransferApp {
 
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label("Destination computer");
+            ui.label("Destination");
+            let mut dst_l = self.dest_location;
+            let changed = Self::location_combo_ui(
+                ui,
+                &self.computers,
+                &self.locations,
+                &mut dst_l,
+                "dst_loc",
+            );
+            if changed {
+                self.apply_location_selection(dst_l, Side::Dest);
+            }
+
+            ui.separator();
+            ui.label("Browse on");
             let mut dst_c = self.dest_computer;
-            Self::computer_combo_ui(ui, &self.computers, &mut dst_c, "dst_comp");
+            Self::computer_combo_ui(ui, &self.computers, &mut dst_c, "dst_browse_host");
             if dst_c != self.dest_computer {
                 self.dest_computer = dst_c;
-                self.dest_location = None;
-                self.dest_path_edit.clear();
             }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Destination folder");
-            let path_label = self
-                .dest_location
-                .and_then(|id| self.location(id))
-                .map(|l| l.path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "(none selected)".into());
-            ui.monospace(&path_label);
-
             if ui.button("Browse…").clicked() {
                 if let Some(cid) = self.dest_computer {
                     self.open_folder_browse(cid, BrowseTarget::Dest);
@@ -884,41 +894,17 @@ impl FileTransferApp {
             }
             ui.add(
                 egui::TextEdit::singleline(&mut self.dest_path_edit)
-                    .desired_width(200.0)
+                    .desired_width(180.0)
                     .hint_text("or type path"),
             );
             if ui.button("Use path").clicked() {
                 let p = self.dest_path_edit.trim();
                 if !p.is_empty() {
                     if let Some(cid) = self.dest_computer {
-                        self.dest_location = Some(self.ensure_location(cid, PathBuf::from(p)));
+                        let id = self.ensure_location(cid, PathBuf::from(p));
+                        self.apply_location_selection(Some(id), Side::Dest);
                     }
                 }
-            }
-
-            let saved: Vec<&Location> = self
-                .locations
-                .iter()
-                .filter(|l| Some(l.computer_id) == self.dest_computer)
-                .collect();
-            if !saved.is_empty() {
-                let mut dst_l = self.dest_location;
-                let selected_text = dst_l
-                    .and_then(|id| self.location(id))
-                    .map(|l| l.name.clone())
-                    .unwrap_or_else(|| "Saved…".into());
-                egui::ComboBox::from_id_salt("dst_saved")
-                    .selected_text(selected_text)
-                    .show_ui(ui, |ui| {
-                        for l in &saved {
-                            ui.selectable_value(
-                                &mut dst_l,
-                                Some(l.id),
-                                format!("{} — {}", l.name, l.path.display()),
-                            );
-                        }
-                    });
-                self.dest_location = dst_l;
             }
         });
 
@@ -954,6 +940,25 @@ impl FileTransferApp {
             }
         });
 
+        let rate_eta = {
+            let mut parts = Vec::new();
+            if let Some(rate) = self.progress.bytes_per_sec.filter(|r| *r > 0.0) {
+                parts.push(format_rate(rate));
+            }
+            if let Some(eta) = self.progress.eta_secs {
+                if eta == 0 && !self.transferring {
+                    // finished
+                } else if self.transferring {
+                    parts.push(format!("ETA {}", format_eta(eta)));
+                }
+            }
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", parts.join(" · "))
+            }
+        };
+
         let frac = match (self.progress.bytes_done, self.progress.bytes_total) {
             (done, Some(total)) if total > 0 => (done as f32 / total as f32).clamp(0.0, 1.0),
             _ if self.transferring => -1.0,
@@ -965,19 +970,19 @@ impl FileTransferApp {
                 egui::ProgressBar::new(self.progress.bytes_done as f32 % 1000.0 / 1000.0)
                     .animate(true)
                     .text(format!(
-                        "{} transferred…",
+                        "{} transferred…{rate_eta}",
                         format_bytes(self.progress.bytes_done)
                     )),
             );
         } else {
             let text = match self.progress.bytes_total {
                 Some(t) => format!(
-                    "{} / {} ({:.0}%)",
+                    "{} / {} ({:.0}%){rate_eta}",
                     format_bytes(self.progress.bytes_done),
                     format_bytes(t),
                     frac * 100.0
                 ),
-                None => format_bytes(self.progress.bytes_done),
+                None => format!("{}{rate_eta}", format_bytes(self.progress.bytes_done)),
             };
             ui.add(egui::ProgressBar::new(frac).text(text));
         }
@@ -987,6 +992,69 @@ impl FileTransferApp {
         if !self.status_line.is_empty() {
             ui.label(&self.status_line);
         }
+    }
+
+    fn apply_location_selection(&mut self, location_id: Option<Uuid>, side: Side) {
+        let computer_id = location_id.and_then(|id| self.location(id).map(|l| l.computer_id));
+        match side {
+            Side::Source => {
+                if location_id != self.source_location {
+                    self.entries.clear();
+                    self.selected.clear();
+                    self.source_path_edit.clear();
+                }
+                self.source_location = location_id;
+                if let Some(cid) = computer_id {
+                    self.source_computer = Some(cid);
+                }
+            }
+            Side::Dest => {
+                if location_id != self.dest_location {
+                    self.dest_path_edit.clear();
+                }
+                self.dest_location = location_id;
+                if let Some(cid) = computer_id {
+                    self.dest_computer = Some(cid);
+                }
+            }
+        }
+    }
+
+    fn location_label(computers: &[Computer], loc: &Location) -> String {
+        let host = computers
+            .iter()
+            .find(|c| c.id == loc.computer_id)
+            .map(|c| c.name.as_str())
+            .unwrap_or("?");
+        format!("{host} — {} ({})", loc.name, loc.path.display())
+    }
+
+    /// Returns true when the selected location id changed.
+    fn location_combo_ui(
+        ui: &mut egui::Ui,
+        computers: &[Computer],
+        locations: &[Location],
+        selected: &mut Option<Uuid>,
+        id: &str,
+    ) -> bool {
+        let before = *selected;
+        let selected_text = selected
+            .and_then(|lid| locations.iter().find(|l| l.id == lid))
+            .map(|l| Self::location_label(computers, l))
+            .unwrap_or_else(|| "(choose host / folder)".into());
+        egui::ComboBox::from_id_salt(id)
+            .width(360.0)
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                if locations.is_empty() {
+                    ui.label("No saved locations yet — browse or add on Locations tab");
+                }
+                for l in locations {
+                    let label = Self::location_label(computers, l);
+                    ui.selectable_value(selected, Some(l.id), label);
+                }
+            });
+        *selected != before
     }
 
     fn computer_combo_ui(

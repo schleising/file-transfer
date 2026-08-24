@@ -33,6 +33,10 @@ pub struct Progress {
     pub current_file: Option<String>,
     pub indeterminate: bool,
     pub message: String,
+    /// Instantaneous or smoothed transfer rate (bytes/sec), when known.
+    pub bytes_per_sec: Option<f64>,
+    /// Estimated seconds remaining, when total and rate are known.
+    pub eta_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -863,42 +867,45 @@ fn watch_child(
 
     let mut bytes_done = 0u64;
     let mut err_buf = String::new();
+    let mut rate_bps: Option<f64> = None;
+    let started = std::time::Instant::now();
+    let mut last_sample = started;
+    let mut last_bytes = 0u64;
 
     while let Ok(chunk) = rx.recv() {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        match chunk {
-            RsyncChunk::ProgressLine(line) => {
-                if let Some(p) = parse_progress2_line(&line) {
-                    bytes_done = p;
-                    on_progress(Progress {
-                        bytes_done,
-                        bytes_total,
-                        current_file: None,
-                        indeterminate: bytes_total.is_none(),
-                        message: String::new(),
+        let (line, from_stderr) = match chunk {
+            RsyncChunk::ProgressLine(line) => (line, false),
+            RsyncChunk::ErrText(line) => (line, true),
+            RsyncChunk::Done => continue,
+        };
+        if let Some(parsed) = parse_progress2(&line) {
+            bytes_done = parsed.bytes_done;
+            if let Some(r) = parsed.bytes_per_sec {
+                rate_bps = Some(r);
+            } else {
+                let dt = last_sample.elapsed().as_secs_f64();
+                if dt >= 0.5 && bytes_done >= last_bytes {
+                    let instant = (bytes_done - last_bytes) as f64 / dt;
+                    rate_bps = Some(match rate_bps {
+                        Some(prev) => prev * 0.7 + instant * 0.3,
+                        None => instant,
                     });
+                    last_sample = std::time::Instant::now();
+                    last_bytes = bytes_done;
+                } else if rate_bps.is_none() {
+                    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                    rate_bps = Some(bytes_done as f64 / elapsed);
                 }
             }
-            RsyncChunk::ErrText(s) => {
-                if let Some(p) = parse_progress2_line(&s) {
-                    bytes_done = p;
-                    on_progress(Progress {
-                        bytes_done,
-                        bytes_total,
-                        current_file: None,
-                        indeterminate: bytes_total.is_none(),
-                        message: String::new(),
-                    });
-                } else if !s.trim().is_empty() {
-                    err_buf.push_str(&s);
-                    if !s.ends_with('\n') {
-                        err_buf.push('\n');
-                    }
-                }
+            on_progress(make_progress(bytes_done, bytes_total, rate_bps));
+        } else if from_stderr && !line.trim().is_empty() {
+            err_buf.push_str(&line);
+            if !line.ends_with('\n') {
+                err_buf.push('\n');
             }
-            RsyncChunk::Done => {}
         }
     }
 
@@ -925,12 +932,33 @@ fn watch_child(
         current_file: None,
         indeterminate: false,
         message: "Done".into(),
+        bytes_per_sec: rate_bps,
+        eta_secs: Some(0),
     });
     Ok(TransferResult {
         bytes_transferred: bytes_done,
         cancelled: false,
         message: "OK".into(),
     })
+}
+
+fn make_progress(bytes_done: u64, bytes_total: Option<u64>, rate_bps: Option<f64>) -> Progress {
+    let eta_secs = match (bytes_total, rate_bps) {
+        (Some(total), Some(rate)) if rate > 1.0 && total > bytes_done => {
+            Some(((total - bytes_done) as f64 / rate).ceil() as u64)
+        }
+        (Some(total), _) if total <= bytes_done => Some(0),
+        _ => None,
+    };
+    Progress {
+        bytes_done,
+        bytes_total,
+        current_file: None,
+        indeterminate: bytes_total.is_none(),
+        message: String::new(),
+        bytes_per_sec: rate_bps,
+        eta_secs,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -959,8 +987,7 @@ fn drain_rsync_stream(mut stream: impl Read, kind: StreamKind, tx: mpsc::Sender<
                             acc.clear();
                             let _ = match kind {
                                 StreamKind::Stderr => {
-                                    // progress2 lives on stderr; also keep non-progress for errors
-                                    if parse_progress2_line(&line).is_some() {
+                                    if parse_progress2(&line).is_some() {
                                         tx.send(RsyncChunk::ProgressLine(line))
                                     } else {
                                         tx.send(RsyncChunk::ErrText(line))
@@ -980,7 +1007,7 @@ fn drain_rsync_stream(mut stream: impl Read, kind: StreamKind, tx: mpsc::Sender<
     if !acc.is_empty() {
         let line = String::from_utf8_lossy(&acc).into_owned();
         let _ = match kind {
-            StreamKind::Stderr if parse_progress2_line(&line).is_none() => {
+            StreamKind::Stderr if parse_progress2(&line).is_none() => {
                 tx.send(RsyncChunk::ErrText(line))
             }
             _ => tx.send(RsyncChunk::ProgressLine(line)),
@@ -989,23 +1016,62 @@ fn drain_rsync_stream(mut stream: impl Read, kind: StreamKind, tx: mpsc::Sender<
     let _ = tx.send(RsyncChunk::Done);
 }
 
+struct ParsedProgress {
+    bytes_done: u64,
+    bytes_per_sec: Option<f64>,
+}
+
 /// Parse rsync `--info=progress2` lines like:
-/// `  1,234,567  45%  12.34MB/s    0:00:01 (xfr#1, to-chk=3/10)`
-pub fn parse_progress2_line(line: &str) -> Option<u64> {
+/// `  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=3/10)`
+fn parse_progress2(line: &str) -> Option<ParsedProgress> {
     let t = line.trim();
     if t.is_empty() {
         return None;
     }
-    let first = t.split_whitespace().next()?;
+    if !t.contains('%') && !t.contains("xfr#") {
+        return None;
+    }
+    let mut parts = t.split_whitespace();
+    let first = parts.next()?;
     let digits: String = first.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         return None;
     }
-    // progress2 lines usually include % or xfr#
-    if !t.contains('%') && !t.contains("xfr#") {
-        return None;
+    let bytes_done = digits.parse().ok()?;
+    // Skip percent token if present, then look for a *B/s rate.
+    let mut bytes_per_sec = None;
+    for tok in parts {
+        if let Some(rate) = parse_rate_token(tok) {
+            bytes_per_sec = Some(rate);
+            break;
+        }
     }
-    digits.parse().ok()
+    Some(ParsedProgress {
+        bytes_done,
+        bytes_per_sec,
+    })
+}
+
+fn parse_rate_token(tok: &str) -> Option<f64> {
+    let lower = tok.to_ascii_lowercase();
+    let (num, mult) = if let Some(rest) = lower.strip_suffix("gb/s") {
+        (rest, 1024.0 * 1024.0 * 1024.0)
+    } else if let Some(rest) = lower.strip_suffix("mb/s") {
+        (rest, 1024.0 * 1024.0)
+    } else if let Some(rest) = lower.strip_suffix("kb/s") {
+        (rest, 1024.0)
+    } else if let Some(rest) = lower.strip_suffix("b/s") {
+        (rest, 1.0)
+    } else {
+        return None;
+    };
+    let n: f64 = num.parse().ok()?;
+    Some(n * mult)
+}
+
+/// Back-compat helper for tests / simple callers.
+pub fn parse_progress2_line(line: &str) -> Option<u64> {
+    parse_progress2(line).map(|p| p.bytes_done)
 }
 
 fn sanitize_error(stderr: &str) -> String {
@@ -1028,10 +1094,12 @@ mod tests {
 
     #[test]
     fn parse_progress() {
-        let n = parse_progress2_line(
+        let p = parse_progress2(
             "  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=0/1)",
-        );
-        assert_eq!(n, Some(1_048_576));
+        )
+        .unwrap();
+        assert_eq!(p.bytes_done, 1_048_576);
+        assert!((p.bytes_per_sec.unwrap() - 10.0 * 1024.0 * 1024.0).abs() < 1.0);
     }
 
     #[test]
