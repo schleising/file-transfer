@@ -93,11 +93,65 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Options for non-interactive SSH (controller→host and host→host).
+fn ssh_common_opts() -> &'static [&'static str] {
+    &[
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "UpdateHostKeys=yes",
+    ]
+}
+
+/// `ssh …` argv fragment for rsync `-e` / remote peer calls (no destination).
+fn peer_ssh_command(peer: &HostRef) -> String {
+    let mut parts: Vec<String> = vec!["ssh".into()];
+    for o in ssh_common_opts() {
+        parts.push((*o).into());
+    }
+    if let Some(port) = peer.ssh_port {
+        parts.push("-p".into());
+        parts.push(port.to_string());
+    }
+    if let Some(id) = &peer.identity_file {
+        parts.push("-i".into());
+        parts.push(id.display().to_string());
+    }
+    parts.join(" ")
+}
+
+fn explain_peer_ssh_error(from: &HostRef, to: &HostRef, stderr: &str) -> String {
+    let msg = stderr.trim();
+    if msg.contains("Host key verification failed") {
+        format!(
+            "Host key verification failed for peer '{to}' (as seen from '{from}'). \
+             The app SSHs using exactly that name — it must match what works interactively. \
+             On '{from}', run once: ssh {ssh_opts}{to} true \
+             Then retry. (Saved name in the app must be identical.)",
+            from = from.ssh_destination,
+            to = to.ssh_destination,
+            ssh_opts = {
+                let mut s = String::new();
+                if let Some(p) = to.ssh_port {
+                    s.push_str(&format!("-p {p} "));
+                }
+                s
+            }
+        )
+    } else {
+        format!("peer SSH failed: {msg}")
+    }
+}
+
 fn ssh_base(host: &HostRef) -> Command {
     let mut cmd = Command::new("ssh");
-    cmd.arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=8")
-        .arg("-o").arg("StrictHostKeyChecking=accept-new");
+    for o in ssh_common_opts() {
+        cmd.arg(o);
+    }
     if let Some(port) = host.ssh_port {
         cmd.arg("-p").arg(port.to_string());
     }
@@ -128,16 +182,19 @@ pub fn test_peer_ssh(from: &HostRef, to: &HostRef) -> Result<()> {
     if from.is_local || to.is_local {
         bail!("peer probe only for two remotes");
     }
-    let remote = format!(
-        "ssh -o BatchMode=yes -o ConnectTimeout=8 {} true",
+    // Run peer ssh under bash so zsh doesn't interfere; use same options as controller SSH.
+    let peer_cmd = format!(
+        "{} {} true",
+        peer_ssh_command(to),
         shell_quote(&to.ssh_destination)
     );
+    let remote = format!("bash -c {}", shell_quote(&peer_cmd));
     let mut cmd = ssh_base(from);
     cmd.arg(remote);
     let out = cmd.output().context("spawn peer ssh")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        bail!("peer SSH failed: {}", err.trim());
+        bail!("{}", explain_peer_ssh_error(from, to, &err));
     }
     Ok(())
 }
@@ -157,7 +214,7 @@ fn list_dir_local(path: &Path) -> Result<Vec<DirEntry>> {
         let ent = ent?;
         let meta = ent.metadata()?;
         let name = ent.file_name().to_string_lossy().to_string();
-        if name == "." || name == ".." {
+        if name == "." || name == ".." || name.starts_with('.') {
             continue;
         }
         let mtime = meta
@@ -182,27 +239,77 @@ fn list_dir_local(path: &Path) -> Result<Vec<DirEntry>> {
 }
 
 fn list_dir_remote(host: &HostRef, path: &Path) -> Result<Vec<DirEntry>> {
-    // Portable: one line per entry — type|size|mtime|name  (name may contain | rarely; use \t sep)
+    // Prefer python3 (identical on Linux + macOS). Avoid zsh globs and GNU vs BSD `stat -f`.
     let path_q = shell_quote(&path.to_string_lossy());
-    let script = format!(
-        r#"cd {path_q} || exit 2
-for f in * .[!.]* ..?*; do
-  [ -e "$f" ] || continue
-  [ "$f" = "." ] && continue
-  [ "$f" = ".." ] && continue
-  if [ -d "$f" ]; then t=d; else t=f; fi
-  sz=$(wc -c <"$f" 2>/dev/null | tr -d ' ' || echo 0)
-  mt=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
-  printf '%s\t%s\t%s\t%s\n' "$t" "$sz" "$mt" "$f"
-done"#,
+    let inner = format!(
+        r#"
+set +e
+path={path_q}
+if [ ! -d "$path" ]; then
+  echo "not a directory: $path" >&2
+  exit 2
+fi
+if command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1; then PY=python
+else PY=
+fi
+if [ -n "$PY" ]; then
+  exec "$PY" -c '
+import os, sys
+root = sys.argv[1]
+try:
+    names = os.listdir(root)
+except OSError as e:
+    sys.stderr.write(str(e) + "\n")
+    sys.exit(2)
+for name in sorted(names, key=lambda s: (not os.path.isdir(os.path.join(root, s)), s.lower())):
+    if name.startswith("."):
+        continue
+    p = os.path.join(root, name)
+    try:
+        st = os.stat(p)
+    except OSError:
+        continue
+    is_dir = os.path.isdir(p)
+    t = "d" if is_dir else "f"
+    size = 0 if is_dir else int(st.st_size)
+    mt = int(st.st_mtime)
+    sys.stdout.write("%s\t%s\t%s\t%s\n" % (t, size, mt, name))
+' "$path"
+fi
+# Fallback without Python: ls + portable stat detection (GNU vs BSD)
+cd "$path" || exit 2
+if stat --version >/dev/null 2>&1; then
+  mt_of() {{ stat -c %Y "$1" 2>/dev/null; }}
+  sz_of() {{ stat -c %s "$1" 2>/dev/null; }}
+else
+  mt_of() {{ stat -f %m "$1" 2>/dev/null; }}
+  sz_of() {{ stat -f %z "$1" 2>/dev/null; }}
+fi
+ls -A 2>/dev/null | while IFS= read -r f || [ -n "$f" ]; do
+  [ -n "$f" ] || continue
+  case "$f" in .* ) continue ;; esac
+  if [ -d "$f" ]; then t=d; sz=0
+  elif [ -f "$f" ]; then t=f; sz=$(sz_of "$f"); sz=${{sz:-0}}
+  else continue
+  fi
+  mt=$(mt_of "$f"); mt=${{mt:-0}}
+  printf "%s\t%s\t%s\t%s\n" "$t" "$sz" "$mt" "$f"
+done
+"#,
         path_q = path_q
     );
+    let remote = format!("bash -c {}", shell_quote(&inner));
     let mut cmd = ssh_base(host);
-    cmd.arg(script);
+    cmd.arg(remote);
     let out = cmd.output().context("ssh list")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        bail!("list failed: {}", err.trim());
+        let msg = err.trim();
+        if msg.is_empty() {
+            bail!("list failed (exit {})", out.status);
+        }
+        bail!("list failed: {msg}");
     }
     let mut entries = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -211,7 +318,7 @@ done"#,
         let sz: u64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
         let mt: i64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
         let name = parts.next().unwrap_or("").to_string();
-        if name.is_empty() {
+        if name.is_empty() || name.starts_with('.') {
             continue;
         }
         entries.push(DirEntry {
@@ -227,6 +334,23 @@ done"#,
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(entries)
+}
+
+pub fn remote_home(host: &HostRef) -> Result<PathBuf> {
+    if host.is_local {
+        return dirs::home_dir().context("no home dir");
+    }
+    let mut cmd = ssh_base(host);
+    cmd.arg("printf %s \"$HOME\"");
+    let out = cmd.output().context("ssh home")?;
+    if !out.status.success() {
+        bail!("could not resolve remote home");
+    }
+    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if home.is_empty() {
+        bail!("empty remote home");
+    }
+    Ok(PathBuf::from(home))
 }
 
 pub fn path_exists(host: &HostRef, path: &Path) -> Result<bool> {
@@ -490,14 +614,7 @@ fn run_rsync_local_client(
 }
 
 fn ssh_rsh_args(host: &HostRef) -> String {
-    let mut s = String::from("ssh -o BatchMode=yes");
-    if let Some(port) = host.ssh_port {
-        s.push_str(&format!(" -p {port}"));
-    }
-    if let Some(id) = &host.identity_file {
-        s.push_str(&format!(" -i {}", id.display()));
-    }
-    s
+    peer_ssh_command(host)
 }
 
 fn maybe_rsync_path_for_remote(cmd: &mut Command, _host: &HostRef) {
@@ -520,7 +637,9 @@ fn run_remote_orchestrated(
     let remote_list = format!("/tmp/ft-files-{}.txt", uuid::Uuid::new_v4());
     {
         let mut cmd = Command::new("scp");
-        cmd.arg("-o").arg("BatchMode=yes");
+        for o in ssh_common_opts() {
+            cmd.arg(o);
+        }
         if let Some(port) = runner.ssh_port {
             cmd.arg("-P").arg(port.to_string());
         }
@@ -541,6 +660,7 @@ fn run_remote_orchestrated(
     let src_base = plan.source_base.to_string_lossy().trim_end_matches('/').to_string();
     let dst_base = plan.dest_base.to_string_lossy().trim_end_matches('/').to_string();
     let rsync_remote = "rsync";
+    let ssh_e = peer_ssh_command(peer);
 
     let script = format!(
         "RSYNC=$(command -v rsync); \
@@ -550,9 +670,10 @@ fn run_remote_orchestrated(
          {body}",
         body = if push {
             format!(
-                "\"$RSYNC\" -a --info=progress2 --files-from={list} -e 'ssh -o BatchMode=yes' \
+                "\"$RSYNC\" -a --info=progress2 --files-from={list} -e {ssh_e} \
                  --rsync-path={rpath} {src}/ {peer}:{dst}/; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
+                ssh_e = shell_quote(&ssh_e),
                 rpath = shell_quote(rsync_remote),
                 src = shell_quote(&src_base),
                 peer = shell_quote(&peer.ssh_destination),
@@ -560,9 +681,10 @@ fn run_remote_orchestrated(
             )
         } else {
             format!(
-                "\"$RSYNC\" -a --info=progress2 --files-from={list} -e 'ssh -o BatchMode=yes' \
+                "\"$RSYNC\" -a --info=progress2 --files-from={list} -e {ssh_e} \
                  --rsync-path={rpath} {peer}:{src}/ {dst}/; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
+                ssh_e = shell_quote(&ssh_e),
                 rpath = shell_quote(rsync_remote),
                 src = shell_quote(&src_base),
                 peer = shell_quote(&peer.ssh_destination),

@@ -23,6 +23,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 dirs = "6"
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
+rfd = "0.15"
 rusqlite = { version = "0.34", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

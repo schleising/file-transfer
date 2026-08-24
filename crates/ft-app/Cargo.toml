@@ -9,11 +9,13 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+dirs.workspace = true
 eframe.workspace = true
 egui.workspace = true
 ft-exec.workspace = true
 ft-mdns.workspace = true
 ft-store.workspace = true
+rfd.workspace = true
 uuid.workspace = true
 
 [package.metadata.bundle]

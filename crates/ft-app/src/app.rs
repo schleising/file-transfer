@@ -23,10 +23,31 @@ enum Tab {
 
 enum BgMsg {
     ListResult(Result<Vec<DirEntry>, String>),
+    BrowseList {
+        path: PathBuf,
+        result: Result<Vec<DirEntry>, String>,
+    },
     Preflight(Result<String, String>),
     Progress(Progress),
     TransferDone(Result<(Uuid, u64, bool), String>),
     TestHost(Result<String, String>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowseTarget {
+    Source,
+    Dest,
+    LocationsForm,
+}
+
+struct FolderBrowser {
+    target: BrowseTarget,
+    computer_id: Uuid,
+    current_path: PathBuf,
+    path_edit: String,
+    entries: Vec<DirEntry>,
+    loading: bool,
+    error: Option<String>,
 }
 
 pub struct FileTransferApp {
@@ -65,6 +86,11 @@ pub struct FileTransferApp {
     loc_name: String,
     loc_path: String,
     location_msg: String,
+    /// Inline path entry for source/dest.
+    source_path_edit: String,
+    dest_path_edit: String,
+
+    folder_browser: Option<FolderBrowser>,
 
     tx: Sender<BgMsg>,
     rx: Receiver<BgMsg>,
@@ -103,6 +129,9 @@ impl FileTransferApp {
             loc_name: String::new(),
             loc_path: String::new(),
             location_msg: String::new(),
+            source_path_edit: String::new(),
+            dest_path_edit: String::new(),
+            folder_browser: None,
             tx,
             rx,
         };
@@ -110,6 +139,7 @@ impl FileTransferApp {
         if let Some(local) = app.computers.iter().find(|c| c.is_local) {
             app.source_computer = Some(local.id);
             app.dest_computer = Some(local.id);
+            app.loc_computer = Some(local.id);
         }
         Ok(app)
     }
@@ -126,6 +156,153 @@ impl FileTransferApp {
 
     fn location(&self, id: Uuid) -> Option<&Location> {
         self.locations.iter().find(|l| l.id == id)
+    }
+
+    fn is_local_computer(&self, id: Option<Uuid>) -> bool {
+        id.and_then(|id| self.computer(id))
+            .map(|c| c.is_local)
+            .unwrap_or(false)
+    }
+
+    /// Find or create a saved location for this computer + absolute path.
+    fn ensure_location(&mut self, computer_id: Uuid, path: PathBuf) -> Uuid {
+        if let Some(existing) = self
+            .locations
+            .iter()
+            .find(|l| l.computer_id == computer_id && l.path == path)
+        {
+            return existing.id;
+        }
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let now = Utc::now();
+        let loc = Location {
+            id: Uuid::new_v4(),
+            computer_id,
+            name,
+            path,
+            kind: LocationKind::Either,
+            created_at: now,
+            updated_at: now,
+        };
+        let id = loc.id;
+        let _ = self.store.upsert_location(&loc);
+        self.reload_store();
+        id
+    }
+
+    fn pick_native_folder(&self, title: &str) -> Option<PathBuf> {
+        let mut dialog = rfd::FileDialog::new().set_title(title);
+        if let Some(home) = dirs::home_dir() {
+            dialog = dialog.set_directory(home);
+        }
+        dialog.pick_folder()
+    }
+
+    /// Open folder picker: native for This Mac, SSH browser for remotes.
+    fn open_folder_browse(&mut self, computer_id: Uuid, target: BrowseTarget) {
+        let Some(c) = self.computer(computer_id).cloned() else {
+            return;
+        };
+        if c.is_local {
+            let title = match target {
+                BrowseTarget::Source => "Choose source folder",
+                BrowseTarget::Dest => "Choose destination folder",
+                BrowseTarget::LocationsForm => "Choose folder to save",
+            };
+            if let Some(path) = self.pick_native_folder(title) {
+                self.apply_browsed_folder(computer_id, target, path);
+            }
+            return;
+        }
+
+        let current = match target {
+            BrowseTarget::Source => self
+                .source_location
+                .and_then(|id| self.location(id))
+                .map(|l| l.path.clone()),
+            BrowseTarget::Dest => self
+                .dest_location
+                .and_then(|id| self.location(id))
+                .map(|l| l.path.clone()),
+            BrowseTarget::LocationsForm => {
+                let p = self.loc_path.trim();
+                if p.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(p))
+                }
+            }
+        }
+        .unwrap_or_else(|| PathBuf::from("~"));
+
+        self.folder_browser = Some(FolderBrowser {
+            target,
+            computer_id,
+            current_path: current.clone(),
+            path_edit: current.to_string_lossy().into_owned(),
+            entries: vec![],
+            loading: true,
+            error: None,
+        });
+        self.refresh_folder_browser();
+    }
+
+    fn apply_browsed_folder(&mut self, computer_id: Uuid, target: BrowseTarget, path: PathBuf) {
+        match target {
+            BrowseTarget::Source => {
+                self.source_location = Some(self.ensure_location(computer_id, path));
+                self.start_list();
+            }
+            BrowseTarget::Dest => {
+                self.dest_location = Some(self.ensure_location(computer_id, path));
+            }
+            BrowseTarget::LocationsForm => {
+                if self.loc_name.trim().is_empty() {
+                    self.loc_name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                }
+                self.loc_path = path.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    fn refresh_folder_browser(&mut self) {
+        let Some(browser) = &self.folder_browser else {
+            return;
+        };
+        let computer_id = browser.computer_id;
+        let mut path = browser.current_path.clone();
+        let Some(c) = self.computer(computer_id).cloned() else {
+            return;
+        };
+        if let Some(browser) = &mut self.folder_browser {
+            browser.loading = true;
+            browser.error = None;
+        }
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let host = FileTransferApp::host_ref(&c);
+            if path == PathBuf::from("~") {
+                path = match ft_exec::remote_home(&host) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let _ = tx.send(BgMsg::BrowseList {
+                            path: PathBuf::from("~"),
+                            result: Err(format!("{e:#}")),
+                        });
+                        return;
+                    }
+                };
+            }
+            let result = ft_exec::list_dir(&host, &path).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(BgMsg::BrowseList { path, result });
+        });
     }
 
     fn host_ref(c: &Computer) -> HostRef {
@@ -151,6 +328,24 @@ impl FileTransferApp {
                         Err(e) => {
                             self.entries.clear();
                             self.list_error = Some(e);
+                        }
+                    }
+                }
+                BgMsg::BrowseList { path, result } => {
+                    if let Some(browser) = &mut self.folder_browser {
+                        browser.loading = false;
+                        browser.current_path = path.clone();
+                        browser.path_edit = path.to_string_lossy().into_owned();
+                        match result {
+                            Ok(entries) => {
+                                browser.entries =
+                                    entries.into_iter().filter(|e| e.is_dir).collect();
+                                browser.error = None;
+                            }
+                            Err(e) => {
+                                browser.entries.clear();
+                                browser.error = Some(e);
+                            }
                         }
                     }
                 }
@@ -385,10 +580,164 @@ impl eframe::App for FileTransferApp {
             Tab::Locations => self.ui_locations(ui),
             Tab::History => self.ui_history(ui),
         });
+
+        self.ui_folder_browser(ctx);
     }
 }
 
 impl FileTransferApp {
+    fn ui_folder_browser(&mut self, ctx: &egui::Context) {
+        let Some(browser) = &self.folder_browser else {
+            return;
+        };
+        let title = match browser.target {
+            BrowseTarget::Source => "Browse source folder",
+            BrowseTarget::Dest => "Browse destination folder",
+            BrowseTarget::LocationsForm => "Browse folder",
+        };
+        let computer_name = self
+            .computer(browser.computer_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "remote".into());
+
+        let mut open = true;
+        let mut close = false;
+        let mut select = false;
+        let mut go_up = false;
+        let mut go_home = false;
+        let mut go_path: Option<PathBuf> = None;
+        let mut enter: Option<String> = None;
+        let mut refresh = false;
+
+        egui::Window::new(format!("{title} — {computer_name}"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([520.0, 420.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Path");
+                    if let Some(browser) = &mut self.folder_browser {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut browser.path_edit).desired_width(360.0),
+                        );
+                        if ui.button("Go").clicked() {
+                            let p = browser.path_edit.trim();
+                            if !p.is_empty() {
+                                go_path = Some(PathBuf::from(p));
+                            }
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Up").clicked() {
+                        go_up = true;
+                    }
+                    if ui.button("Home").clicked() {
+                        go_home = true;
+                    }
+                    if ui.button("Refresh").clicked() {
+                        refresh = true;
+                    }
+                    if let Some(browser) = &self.folder_browser {
+                        if browser.loading {
+                            ui.spinner();
+                        }
+                    }
+                });
+
+                if let Some(browser) = &self.folder_browser {
+                    if let Some(err) = &browser.error {
+                        ui.colored_label(egui::Color32::RED, err);
+                    }
+                    ui.label(format!("Current: {}", browser.current_path.display()));
+                }
+
+                egui::ScrollArea::vertical()
+                    .id_salt("browse_dirs")
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        let entries = self
+                            .folder_browser
+                            .as_ref()
+                            .map(|b| b.entries.clone())
+                            .unwrap_or_default();
+                        for e in entries {
+                            ui.horizontal(|ui| {
+                                if ui.button("Open").clicked()
+                                    || ui
+                                        .selectable_label(false, format!("{}/", e.name))
+                                        .double_clicked()
+                                {
+                                    enter = Some(e.name.clone());
+                                }
+                            });
+                        }
+                        let empty = self
+                            .folder_browser
+                            .as_ref()
+                            .map(|b| b.entries.is_empty() && !b.loading)
+                            .unwrap_or(false);
+                        if empty {
+                            ui.weak("No subfolders");
+                        }
+                    });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Select this folder").clicked() {
+                        select = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if !open {
+            close = true;
+        }
+
+        if let Some(path) = go_path {
+            if let Some(browser) = &mut self.folder_browser {
+                browser.current_path = path;
+                browser.loading = true;
+            }
+            self.refresh_folder_browser();
+        } else if go_up {
+            if let Some(browser) = &mut self.folder_browser {
+                if let Some(parent) = browser.current_path.parent() {
+                    browser.current_path = parent.to_path_buf();
+                    if browser.current_path.as_os_str().is_empty() {
+                        browser.current_path = PathBuf::from("/");
+                    }
+                }
+            }
+            self.refresh_folder_browser();
+        } else if go_home {
+            if let Some(browser) = &mut self.folder_browser {
+                browser.current_path = PathBuf::from("~");
+            }
+            self.refresh_folder_browser();
+        } else if let Some(name) = enter {
+            if let Some(browser) = &mut self.folder_browser {
+                browser.current_path = browser.current_path.join(name);
+            }
+            self.refresh_folder_browser();
+        } else if refresh {
+            self.refresh_folder_browser();
+        } else if select {
+            if let Some(browser) = self.folder_browser.take() {
+                self.apply_browsed_folder(
+                    browser.computer_id,
+                    browser.target,
+                    browser.current_path,
+                );
+            }
+        } else if close {
+            self.folder_browser = None;
+        }
+    }
+
     fn ui_transfer(&mut self, ui: &mut egui::Ui) {
         ui.heading("Transfer");
 
@@ -396,18 +745,79 @@ impl FileTransferApp {
             ui.label("Source computer");
             let mut src_c = self.source_computer;
             Self::computer_combo_ui(ui, &self.computers, &mut src_c, "src_comp");
-            self.source_computer = src_c;
-            ui.label("Location");
-            let mut src_l = self.source_location;
-            Self::location_combo_ui(ui, &self.locations, self.source_computer, &mut src_l, "src_loc");
-            self.source_location = src_l;
+            if src_c != self.source_computer {
+                self.source_computer = src_c;
+                self.source_location = None;
+                self.source_path_edit.clear();
+                self.entries.clear();
+                self.selected.clear();
+            }
+        });
+
+        let mut list_after_pick = false;
+        ui.horizontal(|ui| {
+            ui.label("Source folder");
+            let path_label = self
+                .source_location
+                .and_then(|id| self.location(id))
+                .map(|l| l.path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "(none selected)".into());
+            ui.monospace(&path_label);
+
+            if ui.button("Browse…").clicked() {
+                if let Some(cid) = self.source_computer {
+                    self.open_folder_browse(cid, BrowseTarget::Source);
+                }
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.source_path_edit)
+                    .desired_width(200.0)
+                    .hint_text("or type path"),
+            );
+            if ui.button("Use path").clicked() {
+                let p = self.source_path_edit.trim();
+                if !p.is_empty() {
+                    if let Some(cid) = self.source_computer {
+                        self.source_location = Some(self.ensure_location(cid, PathBuf::from(p)));
+                        list_after_pick = true;
+                    }
+                }
+            }
+
+            let saved: Vec<&Location> = self
+                .locations
+                .iter()
+                .filter(|l| Some(l.computer_id) == self.source_computer)
+                .collect();
+            if !saved.is_empty() {
+                let mut src_l = self.source_location;
+                let selected_text = src_l
+                    .and_then(|id| self.location(id))
+                    .map(|l| l.name.clone())
+                    .unwrap_or_else(|| "Saved…".into());
+                egui::ComboBox::from_id_salt("src_saved")
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        for l in &saved {
+                            ui.selectable_value(&mut src_l, Some(l.id), format!("{} — {}", l.name, l.path.display()));
+                        }
+                    });
+                if src_l != self.source_location {
+                    self.source_location = src_l;
+                    list_after_pick = true;
+                }
+            }
+
             if ui.button("List").clicked() {
-                self.start_list();
+                list_after_pick = true;
             }
             if self.listing {
                 ui.spinner();
             }
         });
+        if list_after_pick {
+            self.start_list();
+        }
 
         if let Some(err) = &self.list_error {
             ui.colored_label(egui::Color32::RED, err);
@@ -451,11 +861,65 @@ impl FileTransferApp {
             ui.label("Destination computer");
             let mut dst_c = self.dest_computer;
             Self::computer_combo_ui(ui, &self.computers, &mut dst_c, "dst_comp");
-            self.dest_computer = dst_c;
-            ui.label("Location");
-            let mut dst_l = self.dest_location;
-            Self::location_combo_ui(ui, &self.locations, self.dest_computer, &mut dst_l, "dst_loc");
-            self.dest_location = dst_l;
+            if dst_c != self.dest_computer {
+                self.dest_computer = dst_c;
+                self.dest_location = None;
+                self.dest_path_edit.clear();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Destination folder");
+            let path_label = self
+                .dest_location
+                .and_then(|id| self.location(id))
+                .map(|l| l.path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "(none selected)".into());
+            ui.monospace(&path_label);
+
+            if ui.button("Browse…").clicked() {
+                if let Some(cid) = self.dest_computer {
+                    self.open_folder_browse(cid, BrowseTarget::Dest);
+                }
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.dest_path_edit)
+                    .desired_width(200.0)
+                    .hint_text("or type path"),
+            );
+            if ui.button("Use path").clicked() {
+                let p = self.dest_path_edit.trim();
+                if !p.is_empty() {
+                    if let Some(cid) = self.dest_computer {
+                        self.dest_location = Some(self.ensure_location(cid, PathBuf::from(p)));
+                    }
+                }
+            }
+
+            let saved: Vec<&Location> = self
+                .locations
+                .iter()
+                .filter(|l| Some(l.computer_id) == self.dest_computer)
+                .collect();
+            if !saved.is_empty() {
+                let mut dst_l = self.dest_location;
+                let selected_text = dst_l
+                    .and_then(|id| self.location(id))
+                    .map(|l| l.name.clone())
+                    .unwrap_or_else(|| "Saved…".into());
+                egui::ComboBox::from_id_salt("dst_saved")
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        for l in &saved {
+                            ui.selectable_value(
+                                &mut dst_l,
+                                Some(l.id),
+                                format!("{} — {}", l.name, l.path.display()),
+                            );
+                        }
+                    });
+                self.dest_location = dst_l;
+            }
         });
 
         ui.horizontal(|ui| {
@@ -497,10 +961,14 @@ impl FileTransferApp {
             _ => 0.0,
         };
         if frac < 0.0 {
-            ui.add(egui::ProgressBar::new(self.progress.bytes_done as f32 % 1000.0 / 1000.0).animate(true).text(format!(
-                "{} transferred…",
-                format_bytes(self.progress.bytes_done)
-            )));
+            ui.add(
+                egui::ProgressBar::new(self.progress.bytes_done as f32 % 1000.0 / 1000.0)
+                    .animate(true)
+                    .text(format!(
+                        "{} transferred…",
+                        format_bytes(self.progress.bytes_done)
+                    )),
+            );
         } else {
             let text = match self.progress.bytes_total {
                 Some(t) => format!(
@@ -536,30 +1004,6 @@ impl FileTransferApp {
             .show_ui(ui, |ui| {
                 for c in computers {
                     ui.selectable_value(selected, Some(c.id), &c.name);
-                }
-            });
-    }
-
-    fn location_combo_ui(
-        ui: &mut egui::Ui,
-        locations: &[Location],
-        computer: Option<Uuid>,
-        selected: &mut Option<Uuid>,
-        id: &str,
-    ) {
-        let locs: Vec<&Location> = locations
-            .iter()
-            .filter(|l| computer == Some(l.computer_id))
-            .collect();
-        let selected_text = selected
-            .and_then(|id| locations.iter().find(|l| l.id == id))
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| "(choose)".into());
-        egui::ComboBox::from_id_salt(id)
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                for l in locs {
-                    ui.selectable_value(selected, Some(l.id), &l.name);
                 }
             });
     }
@@ -733,27 +1177,47 @@ impl FileTransferApp {
         });
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.loc_name);
-            ui.label("name");
+            ui.label("name (optional — defaults to folder name)");
         });
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.loc_path);
-            ui.label("absolute path");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.loc_path)
+                    .desired_width(360.0)
+                    .hint_text("absolute path"),
+            );
+            let local = self.is_local_computer(self.loc_computer);
+            if ui.button("Browse…").clicked() {
+                if let Some(cid) = self.loc_computer {
+                    self.open_folder_browse(cid, BrowseTarget::LocationsForm);
+                } else {
+                    self.location_msg = "Choose a computer first".into();
+                }
+            }
+            let _ = local;
         });
         if ui.button("Add").clicked() {
             if let Some(cid) = self.loc_computer {
-                let now = Utc::now();
-                let loc = Location {
-                    id: Uuid::new_v4(),
-                    computer_id: cid,
-                    name: self.loc_name.trim().to_string(),
-                    path: PathBuf::from(self.loc_path.trim()),
-                    kind: LocationKind::Either,
-                    created_at: now,
-                    updated_at: now,
-                };
-                if loc.name.is_empty() || self.loc_path.trim().is_empty() {
-                    self.location_msg = "Name and path required".into();
+                let path = PathBuf::from(self.loc_path.trim());
+                if self.loc_path.trim().is_empty() {
+                    self.location_msg = "Path required".into();
                 } else {
+                    let name = if self.loc_name.trim().is_empty() {
+                        path.file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+                    } else {
+                        self.loc_name.trim().to_string()
+                    };
+                    let now = Utc::now();
+                    let loc = Location {
+                        id: Uuid::new_v4(),
+                        computer_id: cid,
+                        name,
+                        path,
+                        kind: LocationKind::Either,
+                        created_at: now,
+                        updated_at: now,
+                    };
                     let _ = self.store.upsert_location(&loc);
                     self.loc_name.clear();
                     self.loc_path.clear();
