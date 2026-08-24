@@ -288,11 +288,12 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 ## 12. GUI details
 
-- Toolkit: **egui / eframe**.
+- Toolkit: **egui / eframe** with a macOS-inspired light theme (system blue accent `#007AFF`, card layout, rounded corners).
+- Layout: **sidebar navigation** (Transfer, Computers, Locations, History); **persistent bottom progress bar** on all tabs (status, bytes, rate, ETA, Cancel while transferring).
+- Icons: custom vector icons (SF Symbol–style) for nav, folders, files, network, status.
+- Transfer: card sections for Source / Files / Destination; combined location dropdowns; primary **Start Transfer** action.
+- Progress footer: custom bar (not egui default); shows on every tab.
 - Packaging: minimal `Info.plist` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
-- Transfer: combined **host / folder** location dropdowns; separate **Browse on** host picker for native or SSH folder browse; path entry + **Use path** for ad-hoc locations.
-- Progress bar: percent (from rsync when available), bytes, rate, ETA; status line **Transfer complete** on payload done.
-- Start enabled when source/dest locations are set and at least one entry is selected (preflight still required for a clean run).
 
 ---
 

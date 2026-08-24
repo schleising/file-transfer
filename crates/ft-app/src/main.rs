@@ -1,11 +1,16 @@
 mod app;
+mod icons;
+mod theme;
+mod util;
+mod widgets;
 
 use anyhow::Result;
 
 fn main() -> Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
+            .with_inner_size([1120.0, 740.0])
+            .with_min_inner_size([900.0, 560.0])
             .with_title("File Transfer"),
         ..Default::default()
     };
