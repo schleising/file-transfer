@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ft-store",
+    "crates/ft-exec",
+    "crates/ft-mdns",
+    "crates/ft-app",
+]
+default-members = ["crates/ft-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Steve"]
+
+[workspace.dependencies]
+ft-store = { path = "crates/ft-store" }
+ft-exec = { path = "crates/ft-exec" }
+ft-mdns = { path = "crates/ft-mdns" }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+dirs = "6"
+eframe = { version = "0.31", default-features = true }
+egui = "0.31"
+rusqlite = { version = "0.34", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }

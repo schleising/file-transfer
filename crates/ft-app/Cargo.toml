@@ -1,0 +1,24 @@
+[package]
+name = "ft-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Orchestrate direct rsync-over-SSH file transfers from a Mac"
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+eframe.workspace = true
+egui.workspace = true
+ft-exec.workspace = true
+ft-mdns.workspace = true
+ft-store.workspace = true
+uuid.workspace = true
+
+[package.metadata.bundle]
+name = "File Transfer"
+identifier = "local.file-transfer"
+short_description = "Direct rsync-over-SSH file transfers"
+category = "Utility"
+osx_minimum_system_version = "13.0"

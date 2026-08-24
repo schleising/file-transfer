@@ -1,0 +1,501 @@
+//! Persist computers, locations, and job metadata.
+//! Never store transferred filenames (privacy rule).
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LocationKind {
+    Source,
+    Dest,
+    Either,
+}
+
+impl LocationKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Dest => "dest",
+            Self::Either => "either",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "source" => Self::Source,
+            "dest" => Self::Dest,
+            _ => Self::Either,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JobStatus {
+    Running,
+    Ok,
+    Failed,
+    Cancelled,
+}
+
+impl JobStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "running" => Self::Running,
+            "ok" => Self::Ok,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Computer {
+    pub id: Uuid,
+    pub name: String,
+    /// SSH destination: alias or `user@host`. Empty when `is_local`.
+    pub ssh_destination: String,
+    pub ssh_port: Option<u16>,
+    pub identity_file: Option<PathBuf>,
+    pub bonjour_name: Option<String>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub is_local: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Location {
+    pub id: Uuid,
+    pub computer_id: Uuid,
+    pub name: String,
+    pub path: PathBuf,
+    pub kind: LocationKind,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRecord {
+    pub id: Uuid,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub source_computer_id: Uuid,
+    pub source_location_id: Uuid,
+    pub dest_computer_id: Uuid,
+    pub dest_location_id: Uuid,
+    pub bytes_total: Option<u64>,
+    pub bytes_transferred: Option<u64>,
+    pub file_count: Option<u64>,
+    pub status: JobStatus,
+    /// High-level error only — must not contain filenames.
+    pub error_summary: Option<String>,
+}
+
+pub struct Store {
+    conn: Connection,
+}
+
+impl Store {
+    pub fn open_default() -> Result<Self> {
+        let dir = app_data_dir()?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        Self::open(dir.join("file-transfer.sqlite3"))
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open(path.as_ref())
+            .with_context(|| format!("open db {}", path.as_ref().display()))?;
+        let store = Self { conn };
+        store.migrate()?;
+        store.ensure_local_computer()?;
+        Ok(store)
+    }
+
+    fn migrate(&self) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS computers (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                ssh_destination TEXT NOT NULL DEFAULT '',
+                ssh_port INTEGER,
+                identity_file TEXT,
+                bonjour_name TEXT,
+                last_seen_at TEXT,
+                is_local INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS locations (
+                id TEXT PRIMARY KEY NOT NULL,
+                computer_id TEXT NOT NULL REFERENCES computers(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                source_computer_id TEXT NOT NULL,
+                source_location_id TEXT NOT NULL,
+                dest_computer_id TEXT NOT NULL,
+                dest_location_id TEXT NOT NULL,
+                bytes_total INTEGER,
+                bytes_transferred INTEGER,
+                file_count INTEGER,
+                status TEXT NOT NULL,
+                error_summary TEXT
+            );
+            "#,
+        )?;
+        Ok(())
+    }
+
+    fn ensure_local_computer(&self) -> Result<()> {
+        let exists: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM computers WHERE is_local = 1 LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            return Ok(());
+        }
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+        self.conn.execute(
+            "INSERT INTO computers (id, name, ssh_destination, ssh_port, identity_file, bonjour_name, last_seen_at, is_local, created_at, updated_at)
+             VALUES (?1, ?2, '', NULL, NULL, NULL, NULL, 1, ?3, ?4)",
+            params![
+                id.to_string(),
+                "This Mac",
+                now.to_rfc3339(),
+                now.to_rfc3339()
+            ],
+        )?;
+        if let Some(home) = dirs::home_dir() {
+            let loc_id = Uuid::new_v4();
+            self.conn.execute(
+                "INSERT INTO locations (id, computer_id, name, path, kind, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    loc_id.to_string(),
+                    id.to_string(),
+                    "Home",
+                    home.to_string_lossy(),
+                    "either",
+                    now.to_rfc3339(),
+                    now.to_rfc3339(),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn local_computer(&self) -> Result<Computer> {
+        self.computers()?
+            .into_iter()
+            .find(|c| c.is_local)
+            .context("local computer missing")
+    }
+
+    pub fn computers(&self) -> Result<Vec<Computer>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, ssh_destination, ssh_port, identity_file, bonjour_name, last_seen_at, is_local, created_at, updated_at
+             FROM computers ORDER BY is_local DESC, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Computer {
+                id: parse_uuid(&row.get::<_, String>(0)?)?,
+                name: row.get(1)?,
+                ssh_destination: row.get(2)?,
+                ssh_port: row.get::<_, Option<i64>>(3)?.map(|p| p as u16),
+                identity_file: row
+                    .get::<_, Option<String>>(4)?
+                    .map(PathBuf::from),
+                bonjour_name: row.get(5)?,
+                last_seen_at: parse_opt_time(row.get(6)?)?,
+                is_local: row.get::<_, i64>(7)? != 0,
+                created_at: parse_time(&row.get::<_, String>(8)?)?,
+                updated_at: parse_time(&row.get::<_, String>(9)?)?,
+            })
+        })?;
+        collect_mapped(rows)
+    }
+
+    pub fn upsert_computer(&self, c: &Computer) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO computers (id, name, ssh_destination, ssh_port, identity_file, bonjour_name, last_seen_at, is_local, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                ssh_destination=excluded.ssh_destination,
+                ssh_port=excluded.ssh_port,
+                identity_file=excluded.identity_file,
+                bonjour_name=excluded.bonjour_name,
+                last_seen_at=excluded.last_seen_at,
+                is_local=excluded.is_local,
+                updated_at=excluded.updated_at",
+            params![
+                c.id.to_string(),
+                c.name,
+                c.ssh_destination,
+                c.ssh_port.map(|p| p as i64),
+                c.identity_file.as_ref().map(|p| p.to_string_lossy().to_string()),
+                c.bonjour_name,
+                c.last_seen_at.map(|t| t.to_rfc3339()),
+                c.is_local as i64,
+                c.created_at.to_rfc3339(),
+                c.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_computer(&self, id: Uuid) -> Result<()> {
+        let is_local: i64 = self.conn.query_row(
+            "SELECT is_local FROM computers WHERE id = ?1",
+            params![id.to_string()],
+            |r| r.get(0),
+        )?;
+        if is_local != 0 {
+            anyhow::bail!("cannot delete This Mac");
+        }
+        self.conn
+            .execute("DELETE FROM locations WHERE computer_id = ?1", params![id.to_string()])?;
+        self.conn
+            .execute("DELETE FROM computers WHERE id = ?1", params![id.to_string()])?;
+        Ok(())
+    }
+
+    pub fn locations(&self) -> Result<Vec<Location>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, computer_id, name, path, kind, created_at, updated_at
+             FROM locations ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], map_location)?;
+        collect_mapped(rows)
+    }
+
+    pub fn locations_for(&self, computer_id: Uuid) -> Result<Vec<Location>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, computer_id, name, path, kind, created_at, updated_at
+             FROM locations WHERE computer_id = ?1 ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![computer_id.to_string()], map_location)?;
+        collect_mapped(rows)
+    }
+
+    pub fn upsert_location(&self, loc: &Location) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO locations (id, computer_id, name, path, kind, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                computer_id=excluded.computer_id,
+                name=excluded.name,
+                path=excluded.path,
+                kind=excluded.kind,
+                updated_at=excluded.updated_at",
+            params![
+                loc.id.to_string(),
+                loc.computer_id.to_string(),
+                loc.name,
+                loc.path.to_string_lossy(),
+                loc.kind.as_str(),
+                loc.created_at.to_rfc3339(),
+                loc.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_location(&self, id: Uuid) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM locations WHERE id = ?1", params![id.to_string()])?;
+        Ok(())
+    }
+
+    pub fn insert_job(&self, job: &JobRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO jobs (id, started_at, finished_at, source_computer_id, source_location_id,
+             dest_computer_id, dest_location_id, bytes_total, bytes_transferred, file_count, status, error_summary)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                job.id.to_string(),
+                job.started_at.to_rfc3339(),
+                job.finished_at.map(|t| t.to_rfc3339()),
+                job.source_computer_id.to_string(),
+                job.source_location_id.to_string(),
+                job.dest_computer_id.to_string(),
+                job.dest_location_id.to_string(),
+                job.bytes_total.map(|b| b as i64),
+                job.bytes_transferred.map(|b| b as i64),
+                job.file_count.map(|b| b as i64),
+                job.status.as_str(),
+                job.error_summary,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_job(&self, job: &JobRecord) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET finished_at=?2, bytes_total=?3, bytes_transferred=?4, file_count=?5,
+             status=?6, error_summary=?7 WHERE id=?1",
+            params![
+                job.id.to_string(),
+                job.finished_at.map(|t| t.to_rfc3339()),
+                job.bytes_total.map(|b| b as i64),
+                job.bytes_transferred.map(|b| b as i64),
+                job.file_count.map(|b| b as i64),
+                job.status.as_str(),
+                job.error_summary,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn jobs(&self) -> Result<Vec<JobRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, started_at, finished_at, source_computer_id, source_location_id,
+             dest_computer_id, dest_location_id, bytes_total, bytes_transferred, file_count, status, error_summary
+             FROM jobs ORDER BY started_at DESC LIMIT 200",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(JobRecord {
+                id: parse_uuid(&row.get::<_, String>(0)?)?,
+                started_at: parse_time(&row.get::<_, String>(1)?)?,
+                finished_at: parse_opt_time(row.get(2)?)?,
+                source_computer_id: parse_uuid(&row.get::<_, String>(3)?)?,
+                source_location_id: parse_uuid(&row.get::<_, String>(4)?)?,
+                dest_computer_id: parse_uuid(&row.get::<_, String>(5)?)?,
+                dest_location_id: parse_uuid(&row.get::<_, String>(6)?)?,
+                bytes_total: row.get::<_, Option<i64>>(7)?.map(|b| b as u64),
+                bytes_transferred: row.get::<_, Option<i64>>(8)?.map(|b| b as u64),
+                file_count: row.get::<_, Option<i64>>(9)?.map(|b| b as u64),
+                status: JobStatus::parse(&row.get::<_, String>(10)?),
+                error_summary: row.get(11)?,
+            })
+        })?;
+        collect_mapped(rows)
+    }
+}
+
+fn app_data_dir() -> Result<PathBuf> {
+    let base = dirs::data_dir().context("no data dir")?;
+    Ok(base.join("File Transfer"))
+}
+
+fn parse_uuid(s: &str) -> Result<Uuid, rusqlite::Error> {
+    Uuid::parse_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn parse_time(s: &str) -> Result<DateTime<Utc>, rusqlite::Error> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn parse_opt_time(s: Option<String>) -> Result<Option<DateTime<Utc>>, rusqlite::Error> {
+    match s {
+        None => Ok(None),
+        Some(s) => Ok(Some(parse_time(&s)?)),
+    }
+}
+
+fn map_location(row: &rusqlite::Row<'_>) -> rusqlite::Result<Location> {
+    Ok(Location {
+        id: parse_uuid(&row.get::<_, String>(0)?)?,
+        computer_id: parse_uuid(&row.get::<_, String>(1)?)?,
+        name: row.get(2)?,
+        path: PathBuf::from(row.get::<_, String>(3)?),
+        kind: LocationKind::parse(&row.get::<_, String>(4)?),
+        created_at: parse_time(&row.get::<_, String>(5)?)?,
+        updated_at: parse_time(&row.get::<_, String>(6)?)?,
+    })
+}
+
+fn collect_mapped<T, I>(rows: I) -> Result<Vec<T>>
+where
+    I: Iterator<Item = Result<T, rusqlite::Error>>,
+{
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_computer_location_job() {
+        let store = Store::open(":memory:").unwrap();
+        let local = store.local_computer().unwrap();
+        assert!(local.is_local);
+
+        let now = Utc::now();
+        let remote = Computer {
+            id: Uuid::new_v4(),
+            name: "NAS".into(),
+            ssh_destination: "nas".into(),
+            ssh_port: None,
+            identity_file: None,
+            bonjour_name: Some("nas.local".into()),
+            last_seen_at: None,
+            is_local: false,
+            created_at: now,
+            updated_at: now,
+        };
+        store.upsert_computer(&remote).unwrap();
+
+        let loc = Location {
+            id: Uuid::new_v4(),
+            computer_id: remote.id,
+            name: "Media".into(),
+            path: PathBuf::from("/data/media"),
+            kind: LocationKind::Either,
+            created_at: now,
+            updated_at: now,
+        };
+        store.upsert_location(&loc).unwrap();
+        assert_eq!(store.locations_for(remote.id).unwrap().len(), 1);
+
+        let job = JobRecord {
+            id: Uuid::new_v4(),
+            started_at: now,
+            finished_at: Some(now),
+            source_computer_id: local.id,
+            source_location_id: loc.id,
+            dest_computer_id: remote.id,
+            dest_location_id: loc.id,
+            bytes_total: Some(100),
+            bytes_transferred: Some(100),
+            file_count: Some(2),
+            status: JobStatus::Ok,
+            error_summary: None,
+        };
+        store.insert_job(&job).unwrap();
+        assert_eq!(store.jobs().unwrap().len(), 1);
+    }
+}
