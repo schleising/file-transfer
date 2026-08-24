@@ -8,10 +8,41 @@ use ft_exec::Progress;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NavTab {
-    Transfer,
-    Computers,
-    Locations,
+    Source,
+    Files,
+    Destination,
     History,
+}
+
+impl NavTab {
+    pub fn prev(self) -> Option<Self> {
+        match self {
+            NavTab::Source => None,
+            NavTab::Files => Some(NavTab::Source),
+            NavTab::Destination => Some(NavTab::Files),
+            NavTab::History => None,
+        }
+    }
+
+    pub fn next(self) -> Option<Self> {
+        match self {
+            NavTab::Source => Some(NavTab::Files),
+            NavTab::Files => Some(NavTab::Destination),
+            NavTab::Destination => None,
+            NavTab::History => None,
+        }
+    }
+
+    pub fn is_wizard(self) -> bool {
+        matches!(self, NavTab::Source | NavTab::Files | NavTab::Destination)
+    }
+}
+
+pub enum WizardNavAction {
+    None,
+    Back,
+    Next,
+    StartTransfer,
 }
 
 pub fn app_sidebar(ui: &mut Ui, selected: &mut NavTab) {
@@ -29,9 +60,14 @@ pub fn app_sidebar(ui: &mut Ui, selected: &mut NavTab) {
         });
         ui.add_space(20.0);
 
-        nav_item(ui, selected, NavTab::Transfer, Icon::Transfer, "Transfer");
-        nav_item(ui, selected, NavTab::Computers, Icon::Computer, "Computers");
-        nav_item(ui, selected, NavTab::Locations, Icon::Folder, "Locations");
+        nav_item(ui, selected, NavTab::Source, Icon::Computer, "Source");
+        nav_item(ui, selected, NavTab::Files, Icon::Document, "Files");
+        nav_item(ui, selected, NavTab::Destination, Icon::Folder, "Destination");
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(8.0);
+
         nav_item(ui, selected, NavTab::History, Icon::History, "History");
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -250,6 +286,43 @@ pub fn page_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
             add_contents(ui)
         })
         .inner
+}
+
+/// Main content area for wizard steps — no scroll wrapper, respects panel margins.
+pub fn wizard_nav_bar(ui: &mut Ui, tab: NavTab, can_advance: bool) -> WizardNavAction {
+    constrain_content(ui);
+    let mut action = WizardNavAction::None;
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        constrain_content(ui);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            match tab {
+                NavTab::Destination => {
+                    ui.add_enabled_ui(can_advance, |ui| {
+                        if primary_button(ui, "Start Transfer").clicked() {
+                            action = WizardNavAction::StartTransfer;
+                        }
+                    });
+                }
+                _ => {
+                    ui.add_enabled_ui(can_advance, |ui| {
+                        if primary_button(ui, "Next").clicked() {
+                            action = WizardNavAction::Next;
+                        }
+                    });
+                }
+            }
+            if tab.prev().is_some() {
+                ui.add_space(8.0);
+                if secondary_button(ui, "Back").clicked() {
+                    action = WizardNavAction::Back;
+                }
+            }
+        });
+    });
+    action
 }
 
 pub fn path_field(ui: &mut Ui, text: &mut String, hint: &str) -> egui::Response {

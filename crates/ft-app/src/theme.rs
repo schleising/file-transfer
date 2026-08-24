@@ -85,21 +85,36 @@ use egui::Color32;
 pub fn sidebar_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(colors::SIDEBAR_BG)
-        .inner_margin(egui::Margin::symmetric(12, 16))
+        .inner_margin(egui::Margin {
+            left: 14,
+            right: 14,
+            top: 16,
+            bottom: 16,
+        })
         .stroke(egui::Stroke::NONE)
 }
 
 pub fn content_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(colors::WINDOW_BG)
-        .inner_margin(egui::Margin::symmetric(20, 16))
+        .inner_margin(egui::Margin {
+            left: 24,
+            right: 24,
+            top: 20,
+            bottom: 20,
+        })
         .stroke(egui::Stroke::NONE)
 }
 
 pub fn footer_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(colors::FOOTER_BG)
-        .inner_margin(egui::Margin::symmetric(20, 10))
+        .inner_margin(egui::Margin {
+            left: 24,
+            right: 24,
+            top: 12,
+            bottom: 12,
+        })
         .stroke(egui::Stroke::new(1.0_f32, colors::SEPARATOR))
 }
 

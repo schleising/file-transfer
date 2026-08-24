@@ -3,7 +3,7 @@
 use crate::icons::Icon;
 use crate::theme::{self, colors};
 use crate::util::{format_bytes, truncate_err};
-use crate::widgets::{self, NavTab};
+use crate::widgets::{self, NavTab, WizardNavAction};
 use anyhow::Result;
 use chrono::Utc;
 use eframe::egui;
@@ -33,7 +33,6 @@ enum BgMsg {
 enum BrowseTarget {
     Source,
     Dest,
-    LocationsForm,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,6 +69,8 @@ pub struct FileTransferApp {
     selected: HashSet<String>,
     list_error: Option<String>,
     listing: bool,
+    /// Source location id that `entries` currently reflect (`None` = stale / not loaded).
+    list_loaded_for: Option<Uuid>,
 
     preflight_ok: Option<Result<String, String>>,
     progress: Progress,
@@ -84,11 +85,6 @@ pub struct FileTransferApp {
     new_port: String,
     computer_msg: String,
 
-    // Locations form
-    loc_computer: Option<Uuid>,
-    loc_name: String,
-    loc_path: String,
-    location_msg: String,
     /// Inline path entry for source/dest.
     source_path_edit: String,
     dest_path_edit: String,
@@ -108,7 +104,7 @@ impl FileTransferApp {
         let mut app = Self {
             store,
             discovery,
-            tab: NavTab::Transfer,
+            tab: NavTab::Source,
             computers: vec![],
             locations: vec![],
             jobs: vec![],
@@ -120,6 +116,7 @@ impl FileTransferApp {
             selected: HashSet::new(),
             list_error: None,
             listing: false,
+            list_loaded_for: None,
             preflight_ok: None,
             progress: Progress::default(),
             transferring: false,
@@ -130,10 +127,6 @@ impl FileTransferApp {
             new_ssh: String::new(),
             new_port: String::new(),
             computer_msg: String::new(),
-            loc_computer: None,
-            loc_name: String::new(),
-            loc_path: String::new(),
-            location_msg: String::new(),
             source_path_edit: String::new(),
             dest_path_edit: String::new(),
             folder_browser: None,
@@ -144,7 +137,6 @@ impl FileTransferApp {
         if let Some(local) = app.computers.iter().find(|c| c.is_local) {
             app.source_computer = Some(local.id);
             app.dest_computer = Some(local.id);
-            app.loc_computer = Some(local.id);
         }
         Ok(app)
     }
@@ -210,7 +202,6 @@ impl FileTransferApp {
             let title = match target {
                 BrowseTarget::Source => "Choose source folder",
                 BrowseTarget::Dest => "Choose destination folder",
-                BrowseTarget::LocationsForm => "Choose folder to save",
             };
             if let Some(path) = self.pick_native_folder(title) {
                 self.apply_browsed_folder(computer_id, target, path);
@@ -227,14 +218,6 @@ impl FileTransferApp {
                 .dest_location
                 .and_then(|id| self.location(id))
                 .map(|l| l.path.clone()),
-            BrowseTarget::LocationsForm => {
-                let p = self.loc_path.trim();
-                if p.is_empty() {
-                    None
-                } else {
-                    Some(PathBuf::from(p))
-                }
-            }
         }
         .unwrap_or_else(|| PathBuf::from("~"));
 
@@ -260,15 +243,6 @@ impl FileTransferApp {
             BrowseTarget::Dest => {
                 let id = self.ensure_location(computer_id, path);
                 self.apply_location_selection(Some(id), Side::Dest);
-            }
-            BrowseTarget::LocationsForm => {
-                if self.loc_name.trim().is_empty() {
-                    self.loc_name = path
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                }
-                self.loc_path = path.to_string_lossy().into_owned();
             }
         }
     }
@@ -324,11 +298,13 @@ impl FileTransferApp {
                         Ok(e) => {
                             self.entries = e;
                             self.list_error = None;
-                            self.selected.clear();
+                            self.list_loaded_for = self.source_location;
                         }
                         Err(e) => {
                             self.entries.clear();
                             self.list_error = Some(e);
+                            // Don't auto-retry; user can press Refresh.
+                            self.list_loaded_for = self.source_location;
                         }
                     }
                 }
@@ -406,12 +382,43 @@ impl FileTransferApp {
         let Some(loc) = self.location(lid).cloned() else { return };
         self.listing = true;
         self.list_error = None;
+        self.list_loaded_for = None;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let host = FileTransferApp::host_ref(&c);
             let res = ft_exec::list_dir(&host, &loc.path).map_err(|e| format!("{e:#}"));
             let _ = tx.send(BgMsg::ListResult(res));
         });
+    }
+
+    fn refresh_file_list(&mut self) {
+        self.list_loaded_for = None;
+        self.start_list();
+    }
+
+    fn source_ready(&self) -> bool {
+        self.source_location.is_some()
+    }
+
+    fn files_ready(&self) -> bool {
+        !self.selected.is_empty()
+    }
+
+    fn transfer_ready(&self) -> bool {
+        self.source_ready()
+            && self.files_ready()
+            && self.dest_location.is_some()
+            && !self.transferring
+    }
+
+    fn ensure_files_listed(&mut self) {
+        let Some(lid) = self.source_location else {
+            return;
+        };
+        if self.listing || self.list_loaded_for == Some(lid) {
+            return;
+        }
+        self.start_list();
     }
 
     fn run_preflight(&mut self) {
@@ -604,12 +611,47 @@ impl eframe::App for FileTransferApp {
         egui::CentralPanel::default()
             .frame(theme::content_frame())
             .show(ctx, |ui| {
-                widgets::page_body(ui, |ui| match self.tab {
-                    NavTab::Transfer => self.ui_transfer(ui),
-                    NavTab::Computers => self.ui_computers(ui),
-                    NavTab::Locations => self.ui_locations(ui),
-                    NavTab::History => self.ui_history(ui),
-                });
+                if self.tab.is_wizard() {
+                    widgets::constrain_content(ui);
+                    ui.vertical(|ui| {
+                        widgets::constrain_content(ui);
+                        const NAV_RESERVE: f32 = 68.0;
+                        let content_h = (ui.available_height() - NAV_RESERVE).max(120.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), content_h),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                                widgets::constrain_content(ui);
+                                self.ui_wizard_step(ui);
+                            },
+                        );
+                        let can_advance = match self.tab {
+                            NavTab::Source => self.source_ready(),
+                            NavTab::Files => self.files_ready(),
+                            NavTab::Destination => self.transfer_ready(),
+                            NavTab::History => false,
+                        };
+                        match widgets::wizard_nav_bar(ui, self.tab, can_advance) {
+                            WizardNavAction::Back => {
+                                if let Some(prev) = self.tab.prev() {
+                                    self.tab = prev;
+                                }
+                            }
+                            WizardNavAction::Next => {
+                                if let Some(next) = self.tab.next() {
+                                    self.tab = next;
+                                    if self.tab == NavTab::Files {
+                                        self.ensure_files_listed();
+                                    }
+                                }
+                            }
+                            WizardNavAction::StartTransfer => self.start_transfer(),
+                            WizardNavAction::None => {}
+                        }
+                    });
+                } else {
+                    widgets::page_body(ui, |ui| self.ui_history(ui));
+                }
             });
 
         self.ui_folder_browser(ctx);
@@ -624,7 +666,6 @@ impl FileTransferApp {
         let title = match browser.target {
             BrowseTarget::Source => "Browse source folder",
             BrowseTarget::Dest => "Browse destination folder",
-            BrowseTarget::LocationsForm => "Browse folder",
         };
         let computer_name = self
             .computer(browser.computer_id)
@@ -795,33 +836,68 @@ impl FileTransferApp {
         }
     }
 
-    fn ui_transfer(&mut self, ui: &mut egui::Ui) {
-        widgets::constrain_content(ui);
+    fn ui_wizard_step(&mut self, ui: &mut egui::Ui) {
+        match self.tab {
+            NavTab::Source => self.ui_step_source(ui),
+            NavTab::Files => {
+                self.ensure_files_listed();
+                self.ui_step_files(ui);
+            }
+            NavTab::Destination => self.ui_step_destination(ui),
+            NavTab::History => {}
+        }
+    }
+
+    fn ui_step_source(&mut self, ui: &mut egui::Ui) {
         theme::section_heading(
             ui,
-            "Transfer",
-            Some("Select source and destination, then choose files to copy."),
+            "Source",
+            Some("Choose the host and folder to copy from."),
         );
-        ui.add_space(16.0);
-
-        let mut list_after_pick = false;
-
-        theme::card_section(ui, "Source", |ui| {
-            self.ui_location_fields(ui, Side::Source, &mut list_after_pick);
-            if let Some(err) = &self.list_error {
-                ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
-                    Icon::Xmark.ui(ui, colors::ERROR);
-                    widgets::wrapped_label(ui, egui::RichText::new(err).color(colors::ERROR));
-                });
-            }
+        ui.add_space(12.0);
+        theme::card_frame().show(ui, |ui| {
+            widgets::constrain_content(ui);
+            self.ui_location_fields(ui, Side::Source);
         });
+        ui.add_space(12.0);
+        egui::CollapsingHeader::new("Manage hosts").show(ui, |ui| {
+            self.ui_manage_hosts(ui);
+        });
+    }
 
+    fn ui_step_files(&mut self, ui: &mut egui::Ui) {
+        theme::section_heading(
+            ui,
+            "Files",
+            Some("Select files and folders to copy."),
+        );
         ui.add_space(12.0);
 
-        theme::card_section(ui, "Files", |ui| {
+        if !self.source_ready() {
+            ui.label(
+                egui::RichText::new("Choose a source folder first (Source tab).")
+                    .color(colors::TEXT_SECONDARY),
+            );
+            return;
+        }
+
+        if let Some(loc) = self.source_location.and_then(|id| self.location(id)) {
+            let host = self
+                .computer(loc.computer_id)
+                .map(|c| c.name.as_str())
+                .unwrap_or("?");
+            widgets::wrapped_label(
+                ui,
+                egui::RichText::new(format!("{host} — {}", loc.path.display()))
+                    .size(12.0)
+                    .color(colors::TEXT_SECONDARY),
+            );
+            ui.add_space(8.0);
+        }
+
+        theme::card_frame().show(ui, |ui| {
+            widgets::constrain_content(ui);
             ui.horizontal_wrapped(|ui| {
-                widgets::constrain_content(ui);
                 ui.label(
                     egui::RichText::new(format!("{} selected", self.selected.len()))
                         .color(colors::TEXT_SECONDARY),
@@ -834,21 +910,36 @@ impl FileTransferApp {
                 if widgets::secondary_button(ui, "Clear").clicked() {
                     self.selected.clear();
                 }
+                if widgets::secondary_button(ui, "Refresh").clicked() {
+                    self.refresh_file_list();
+                }
+                if self.listing {
+                    ui.spinner();
+                }
             });
-            ui.add_space(8.0);
 
+            if let Some(err) = &self.list_error {
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    Icon::Xmark.ui(ui, colors::ERROR);
+                    widgets::wrapped_label(ui, egui::RichText::new(err).color(colors::ERROR));
+                });
+            }
+
+            ui.add_space(8.0);
+            let list_height = (ui.available_height() - 8.0).max(120.0);
             egui::ScrollArea::vertical()
                 .id_salt("file_list")
                 .auto_shrink([false, false])
-                .max_height(240.0)
+                .max_height(list_height)
                 .show(ui, |ui| {
                     widgets::constrain_content(ui);
-                    if self.entries.is_empty() {
+                    if self.entries.is_empty() && !self.listing {
                         ui.vertical_centered(|ui| {
                             ui.add_space(24.0);
                             Icon::Document.ui(ui, colors::TEXT_SECONDARY);
                             ui.label(
-                                egui::RichText::new("Choose a source and list files")
+                                egui::RichText::new("No files in this folder")
                                     .color(colors::TEXT_SECONDARY),
                             );
                         });
@@ -869,12 +960,11 @@ impl FileTransferApp {
                                     format!("{}  ·  {}", e.name, format_bytes(e.size))
                                 };
                                 let checkbox = ui.add(egui::Checkbox::new(&mut on, ""));
-                                let label = ui.add(egui::Label::new(label).wrap());
-                                if label.clicked() {
+                                let label_resp = ui.add(egui::Label::new(label).wrap());
+                                if label_resp.clicked() {
                                     on = !on;
                                 }
-                                if checkbox.changed() || label.clicked()
-                                {
+                                if checkbox.changed() || label_resp.clicked() {
                                     if on {
                                         self.selected.insert(e.name.clone());
                                     } else {
@@ -886,226 +976,32 @@ impl FileTransferApp {
                     }
                 });
         });
+    }
 
+    fn ui_step_destination(&mut self, ui: &mut egui::Ui) {
+        theme::section_heading(
+            ui,
+            "Destination",
+            Some("Choose where files should be copied to."),
+        );
         ui.add_space(12.0);
-
-        theme::card_section(ui, "Destination", |ui| {
-            self.ui_location_fields(ui, Side::Dest, &mut list_after_pick);
-        });
-
-        if list_after_pick {
-            self.start_list();
-        }
-
-        ui.add_space(16.0);
-
-        ui.horizontal_wrapped(|ui| {
+        theme::card_frame().show(ui, |ui| {
             widgets::constrain_content(ui);
+            self.ui_location_fields(ui, Side::Dest);
+        });
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
             if widgets::secondary_button(ui, "Check access").clicked() {
                 self.run_preflight();
             }
             if let Some(preflight) = &self.preflight_ok {
                 widgets::status_message(ui, preflight);
             }
-            let can_start = !self.transferring
-                && self.source_computer.is_some()
-                && self.source_location.is_some()
-                && self.dest_computer.is_some()
-                && self.dest_location.is_some()
-                && !self.selected.is_empty();
-            ui.add_enabled_ui(can_start, |ui| {
-                if widgets::primary_button(ui, "Start Transfer").clicked() {
-                    self.start_transfer();
-                }
-            });
         });
     }
 
-    fn ui_location_fields(&mut self, ui: &mut egui::Ui, side: Side, list_after_pick: &mut bool) {
+    fn ui_manage_hosts(&mut self, ui: &mut egui::Ui) {
         widgets::constrain_content(ui);
-
-        widgets::field_label(ui, "Saved location");
-        let combo_id = match side {
-            Side::Source => "src_loc",
-            Side::Dest => "dst_loc",
-        };
-        let mut loc = match side {
-            Side::Source => self.source_location,
-            Side::Dest => self.dest_location,
-        };
-        if Self::location_combo_ui(ui, &self.computers, &self.locations, &mut loc, combo_id) {
-            self.apply_location_selection(loc, side);
-            if side == Side::Source {
-                *list_after_pick = self.source_location.is_some();
-            }
-        }
-
-        ui.add_space(10.0);
-        widgets::field_label(ui, "Browse on");
-        let host_id = match side {
-            Side::Source => "src_browse_host",
-            Side::Dest => "dst_browse_host",
-        };
-        let mut computer = match side {
-            Side::Source => self.source_computer,
-            Side::Dest => self.dest_computer,
-        };
-        Self::computer_combo_ui(ui, &self.computers, &mut computer, host_id);
-        match side {
-            Side::Source => self.source_computer = computer,
-            Side::Dest => self.dest_computer = computer,
-        }
-
-        ui.add_space(8.0);
-        widgets::field_label(ui, "Path");
-        match side {
-            Side::Source => {
-                let _ = widgets::path_field(ui, &mut self.source_path_edit, "Path…");
-            }
-            Side::Dest => {
-                let _ = widgets::path_field(ui, &mut self.dest_path_edit, "Path…");
-            }
-        }
-
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            widgets::constrain_content(ui);
-            let browse_target = match side {
-                Side::Source => BrowseTarget::Source,
-                Side::Dest => BrowseTarget::Dest,
-            };
-            if widgets::icon_button(ui, Icon::FolderOpen, "Browse…").clicked() {
-                if let Some(cid) = computer {
-                    self.open_folder_browse(cid, browse_target);
-                }
-            }
-            match side {
-                Side::Source => {
-                    if widgets::secondary_button(ui, "Use").clicked() {
-                        let p = self.source_path_edit.trim();
-                        if !p.is_empty() {
-                            if let Some(cid) = self.source_computer {
-                                let id = self.ensure_location(cid, PathBuf::from(p));
-                                self.apply_location_selection(Some(id), Side::Source);
-                                *list_after_pick = true;
-                            }
-                        }
-                    }
-                    if widgets::secondary_button(ui, "List files").clicked() {
-                        *list_after_pick = true;
-                    }
-                    if self.listing {
-                        ui.spinner();
-                    }
-                }
-                Side::Dest => {
-                    if widgets::secondary_button(ui, "Use").clicked() {
-                        let p = self.dest_path_edit.trim();
-                        if !p.is_empty() {
-                            if let Some(cid) = self.dest_computer {
-                                let id = self.ensure_location(cid, PathBuf::from(p));
-                                self.apply_location_selection(Some(id), Side::Dest);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    fn apply_location_selection(&mut self, location_id: Option<Uuid>, side: Side) {
-        let computer_id = location_id.and_then(|id| self.location(id).map(|l| l.computer_id));
-        match side {
-            Side::Source => {
-                if location_id != self.source_location {
-                    self.entries.clear();
-                    self.selected.clear();
-                    self.source_path_edit.clear();
-                }
-                self.source_location = location_id;
-                if let Some(cid) = computer_id {
-                    self.source_computer = Some(cid);
-                }
-            }
-            Side::Dest => {
-                if location_id != self.dest_location {
-                    self.dest_path_edit.clear();
-                }
-                self.dest_location = location_id;
-                if let Some(cid) = computer_id {
-                    self.dest_computer = Some(cid);
-                }
-            }
-        }
-    }
-
-    fn location_label(computers: &[Computer], loc: &Location) -> String {
-        let host = computers
-            .iter()
-            .find(|c| c.id == loc.computer_id)
-            .map(|c| c.name.as_str())
-            .unwrap_or("?");
-        format!("{host} — {} ({})", loc.name, loc.path.display())
-    }
-
-    /// Returns true when the selected location id changed.
-    fn location_combo_ui(
-        ui: &mut egui::Ui,
-        computers: &[Computer],
-        locations: &[Location],
-        selected: &mut Option<Uuid>,
-        id: &str,
-    ) -> bool {
-        let before = *selected;
-        let selected_text = selected
-            .and_then(|lid| locations.iter().find(|l| l.id == lid))
-            .map(|l| Self::location_label(computers, l))
-            .unwrap_or_else(|| "(choose host / folder)".into());
-        egui::ComboBox::from_id_salt(id)
-            .width(widgets::combo_width(ui))
-            .wrap()
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                if locations.is_empty() {
-                    ui.label("No saved locations yet — browse or add on Locations tab");
-                }
-                for l in locations {
-                    let label = Self::location_label(computers, l);
-                    ui.selectable_value(selected, Some(l.id), label);
-                }
-            });
-        *selected != before
-    }
-
-    fn computer_combo_ui(
-        ui: &mut egui::Ui,
-        computers: &[Computer],
-        selected: &mut Option<Uuid>,
-        id: &str,
-    ) {
-        let selected_text = selected
-            .and_then(|id| computers.iter().find(|c| c.id == id))
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "(choose)".into());
-        egui::ComboBox::from_id_salt(id)
-            .width(widgets::combo_width(ui))
-            .wrap()
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                for c in computers {
-                    ui.selectable_value(selected, Some(c.id), &c.name);
-                }
-            });
-    }
-
-    fn ui_computers(&mut self, ui: &mut egui::Ui) {
-        widgets::constrain_content(ui);
-        theme::section_heading(
-            ui,
-            "Computers",
-            Some("Saved SSH hosts and Bonjour discoveries on the network."),
-        );
-        ui.add_space(16.0);
 
         let discovered = self
             .discovery
@@ -1271,132 +1167,172 @@ impl FileTransferApp {
         }
     }
 
-    fn ui_locations(&mut self, ui: &mut egui::Ui) {
+    fn ui_location_fields(&mut self, ui: &mut egui::Ui, side: Side) {
         widgets::constrain_content(ui);
-        theme::section_heading(
-            ui,
-            "Locations",
-            Some("Saved host and folder combinations for quick selection."),
-        );
-        ui.add_space(16.0);
 
-        theme::card_section(ui, "Saved locations", |ui| {
-            let mut delete = None;
-            if self.locations.is_empty() {
-                ui.label(
-                    egui::RichText::new("No locations saved yet.")
-                        .color(colors::TEXT_SECONDARY),
-                );
+        widgets::field_label(ui, "Saved location");
+        let combo_id = match side {
+            Side::Source => "src_loc",
+            Side::Dest => "dst_loc",
+        };
+        let mut loc = match side {
+            Side::Source => self.source_location,
+            Side::Dest => self.dest_location,
+        };
+        if Self::location_combo_ui(ui, &self.computers, &self.locations, &mut loc, combo_id) {
+            self.apply_location_selection(loc, side);
+        }
+
+        ui.add_space(10.0);
+        widgets::field_label(ui, "Browse on");
+        let host_id = match side {
+            Side::Source => "src_browse_host",
+            Side::Dest => "dst_browse_host",
+        };
+        let mut computer = match side {
+            Side::Source => self.source_computer,
+            Side::Dest => self.dest_computer,
+        };
+        Self::computer_combo_ui(ui, &self.computers, &mut computer, host_id);
+        match side {
+            Side::Source => self.source_computer = computer,
+            Side::Dest => self.dest_computer = computer,
+        }
+
+        ui.add_space(8.0);
+        widgets::field_label(ui, "Path");
+        match side {
+            Side::Source => {
+                let _ = widgets::path_field(ui, &mut self.source_path_edit, "Path…");
             }
-            for loc in &self.locations {
-                let cname = self
-                    .computer(loc.computer_id)
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("?");
-                ui.horizontal_wrapped(|ui| {
-                    widgets::constrain_content(ui);
-                    Icon::Folder.ui(ui, colors::ACCENT);
-                    ui.vertical(|ui| {
-                        ui.set_max_width(ui.available_width());
-                        ui.label(
-                            egui::RichText::new(format!("{cname} — {}", loc.name))
-                                .strong()
-                                .color(colors::TEXT_PRIMARY),
-                        );
-                        widgets::wrapped_label(
-                            ui,
-                            egui::RichText::new(loc.path.to_string_lossy())
-                                .size(12.0)
-                                .color(colors::TEXT_SECONDARY),
-                        );
-                    });
-                    if widgets::secondary_button(ui, "Delete").clicked() {
-                        delete = Some(loc.id);
+            Side::Dest => {
+                let _ = widgets::path_field(ui, &mut self.dest_path_edit, "Path…");
+            }
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            widgets::constrain_content(ui);
+            let browse_target = match side {
+                Side::Source => BrowseTarget::Source,
+                Side::Dest => BrowseTarget::Dest,
+            };
+            if widgets::icon_button(ui, Icon::FolderOpen, "Browse…").clicked() {
+                if let Some(cid) = computer {
+                    self.open_folder_browse(cid, browse_target);
+                }
+            }
+            match side {
+                Side::Source => {
+                    if widgets::secondary_button(ui, "Use").clicked() {
+                        let p = self.source_path_edit.trim();
+                        if !p.is_empty() {
+                            if let Some(cid) = self.source_computer {
+                                let id = self.ensure_location(cid, PathBuf::from(p));
+                                self.apply_location_selection(Some(id), Side::Source);
+                            }
+                        }
                     }
-                });
-                ui.add_space(8.0);
-            }
-            if let Some(id) = delete {
-                let _ = self.store.delete_location(id);
-                self.reload_store();
+                }
+                Side::Dest => {
+                    if widgets::secondary_button(ui, "Use").clicked() {
+                        let p = self.dest_path_edit.trim();
+                        if !p.is_empty() {
+                            if let Some(cid) = self.dest_computer {
+                                let id = self.ensure_location(cid, PathBuf::from(p));
+                                self.apply_location_selection(Some(id), Side::Dest);
+                            }
+                        }
+                    }
+                }
             }
         });
+    }
 
-        ui.add_space(12.0);
+    fn apply_location_selection(&mut self, location_id: Option<Uuid>, side: Side) {
+        let computer_id = location_id.and_then(|id| self.location(id).map(|l| l.computer_id));
+        match side {
+            Side::Source => {
+                if location_id != self.source_location {
+                    self.entries.clear();
+                    self.selected.clear();
+                    self.list_loaded_for = None;
+                    self.source_path_edit.clear();
+                }
+                self.source_location = location_id;
+                if let Some(cid) = computer_id {
+                    self.source_computer = Some(cid);
+                }
+            }
+            Side::Dest => {
+                if location_id != self.dest_location {
+                    self.dest_path_edit.clear();
+                }
+                self.dest_location = location_id;
+                if let Some(cid) = computer_id {
+                    self.dest_computer = Some(cid);
+                }
+            }
+        }
+    }
 
-        theme::card_section(ui, "Add location", |ui| {
-            widgets::field_label(ui, "Computer");
-            let text = self
-                .loc_computer
-                .and_then(|id| self.computer(id))
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| "(choose)".into());
-            egui::ComboBox::from_id_salt("add_loc_comp")
-                .selected_text(text)
-                .width(widgets::combo_width(ui))
-                .wrap()
-                .show_ui(ui, |ui| {
-                    for c in &self.computers {
-                        ui.selectable_value(&mut self.loc_computer, Some(c.id), &c.name);
-                    }
-                });
-            widgets::field_label(ui, "Name");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.loc_name)
-                    .desired_width(widgets::combo_width(ui))
-                    .hint_text("Optional — defaults to folder name"),
-            );
-            widgets::field_label(ui, "Path");
-            widgets::path_field(ui, &mut self.loc_path, "absolute path");
-            ui.horizontal_wrapped(|ui| {
-                if widgets::icon_button(ui, Icon::FolderOpen, "Browse…").clicked() {
-                    if let Some(cid) = self.loc_computer {
-                        self.open_folder_browse(cid, BrowseTarget::LocationsForm);
-                    } else {
-                        self.location_msg = "Choose a computer first".into();
-                    }
+    fn location_label(computers: &[Computer], loc: &Location) -> String {
+        let host = computers
+            .iter()
+            .find(|c| c.id == loc.computer_id)
+            .map(|c| c.name.as_str())
+            .unwrap_or("?");
+        format!("{host} — {} ({})", loc.name, loc.path.display())
+    }
+
+    /// Returns true when the selected location id changed.
+    fn location_combo_ui(
+        ui: &mut egui::Ui,
+        computers: &[Computer],
+        locations: &[Location],
+        selected: &mut Option<Uuid>,
+        id: &str,
+    ) -> bool {
+        let before = *selected;
+        let selected_text = selected
+            .and_then(|lid| locations.iter().find(|l| l.id == lid))
+            .map(|l| Self::location_label(computers, l))
+            .unwrap_or_else(|| "(choose host / folder)".into());
+        egui::ComboBox::from_id_salt(id)
+            .width(widgets::combo_width(ui))
+            .wrap()
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                if locations.is_empty() {
+                    ui.label("No saved locations yet — browse or enter a path");
+                }
+                for l in locations {
+                    let label = Self::location_label(computers, l);
+                    ui.selectable_value(selected, Some(l.id), label);
                 }
             });
-            ui.add_space(10.0);
-            if widgets::primary_button(ui, "Add Location").clicked() {
-                if let Some(cid) = self.loc_computer {
-                    let path = PathBuf::from(self.loc_path.trim());
-                    if self.loc_path.trim().is_empty() {
-                        self.location_msg = "Path required".into();
-                    } else {
-                        let name = if self.loc_name.trim().is_empty() {
-                            path.file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.to_string_lossy().into_owned())
-                        } else {
-                            self.loc_name.trim().to_string()
-                        };
-                        let now = Utc::now();
-                        let loc = Location {
-                            id: Uuid::new_v4(),
-                            computer_id: cid,
-                            name,
-                            path,
-                            kind: LocationKind::Either,
-                            created_at: now,
-                            updated_at: now,
-                        };
-                        let _ = self.store.upsert_location(&loc);
-                        self.loc_name.clear();
-                        self.loc_path.clear();
-                        self.reload_store();
-                        self.location_msg = "Added".into();
-                    }
-                } else {
-                    self.location_msg = "Choose a computer".into();
-                }
-            }
-        });
+        *selected != before
+    }
 
-        if !self.location_msg.is_empty() {
-            ui.add_space(8.0);
-            ui.label(&self.location_msg);
-        }
+    fn computer_combo_ui(
+        ui: &mut egui::Ui,
+        computers: &[Computer],
+        selected: &mut Option<Uuid>,
+        id: &str,
+    ) {
+        let selected_text = selected
+            .and_then(|id| computers.iter().find(|c| c.id == id))
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "(choose)".into());
+        egui::ComboBox::from_id_salt(id)
+            .width(widgets::combo_width(ui))
+            .wrap()
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                for c in computers {
+                    ui.selectable_value(selected, Some(c.id), &c.name);
+                }
+            });
     }
 
     fn ui_history(&mut self, ui: &mut egui::Ui) {
