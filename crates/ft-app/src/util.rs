@@ -64,3 +64,25 @@ pub fn truncate_middle(s: &str, max_chars: usize) -> String {
     out.extend(chars[chars.len() - right..].iter());
     out
 }
+
+pub fn folder_display_name(path: &std::path::Path, fallback: &str) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+pub fn host_color(computer_id: uuid::Uuid) -> egui::Color32 {
+    const PALETTE: [egui::Color32; 8] = [
+        egui::Color32::from_rgb(0, 122, 255),
+        egui::Color32::from_rgb(255, 149, 0),
+        egui::Color32::from_rgb(52, 199, 89),
+        egui::Color32::from_rgb(175, 82, 222),
+        egui::Color32::from_rgb(255, 45, 85),
+        egui::Color32::from_rgb(90, 200, 250),
+        egui::Color32::from_rgb(255, 204, 0),
+        egui::Color32::from_rgb(162, 132, 94),
+    ];
+    let idx = (computer_id.as_u128() as usize) % PALETTE.len();
+    PALETTE[idx]
+}

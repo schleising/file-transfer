@@ -1,8 +1,9 @@
 //! egui UI for File Transfer.app
 
 use crate::icons::Icon;
+use crate::location_tile::{LocationDragPayload, location_tile, location_tile_drop_tail};
 use crate::theme::{self, colors};
-use crate::util::{format_bytes, truncate_err, truncate_middle};
+use crate::util::{folder_display_name, format_bytes, host_color, truncate_err};
 use crate::widgets::{self, NavTab, WizardNavAction};
 use anyhow::Result;
 use chrono::Utc;
@@ -10,7 +11,7 @@ use eframe::egui;
 use ft_exec::{self, DirEntry, HostRef, Progress, TransferPlan};
 use ft_mdns::Discovery;
 use ft_store::{Computer, JobRecord, JobStatus, Location, LocationKind, Store};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -35,7 +36,7 @@ enum BrowseTarget {
     Dest,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Side {
     Source,
     Dest,
@@ -171,6 +172,14 @@ impl FileTransferApp {
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let sort_order = self
+            .locations
+            .iter()
+            .filter(|l| l.computer_id == computer_id)
+            .map(|l| l.sort_order)
+            .max()
+            .unwrap_or(-1)
+            + 1;
         let now = Utc::now();
         let loc = Location {
             id: Uuid::new_v4(),
@@ -178,6 +187,7 @@ impl FileTransferApp {
             name,
             path,
             kind: LocationKind::Either,
+            sort_order,
             created_at: now,
             updated_at: now,
         };
@@ -891,9 +901,10 @@ impl FileTransferApp {
                 .computer(loc.computer_id)
                 .map(|c| c.name.as_str())
                 .unwrap_or("?");
+            let folder = folder_display_name(&loc.path, &loc.name);
             widgets::wrapped_label(
                 ui,
-                egui::RichText::new(format!("{host} — {}", loc.path.display()))
+                egui::RichText::new(format!("{host} — {folder}"))
                     .size(12.0)
                     .color(colors::TEXT_SECONDARY),
             );
@@ -1013,69 +1024,86 @@ impl FileTransferApp {
 
         let mut pick: Option<Uuid> = None;
         let mut open_new = false;
+        let mut delete_id: Option<Uuid> = None;
+        let mut reorder: Option<(Uuid, Uuid, Option<Uuid>)> = None;
 
-        let tile = egui::vec2(112.0, 128.0);
-        ui.horizontal_wrapped(|ui| {
-            widgets::constrain_content(ui);
-            for loc in &self.locations {
-                let host = self
-                    .computer(loc.computer_id)
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("?");
-                let selected = selected_id == Some(loc.id);
-                let (rect, response) = ui.allocate_exact_size(tile, egui::Sense::click());
-                if ui.is_rect_visible(rect) {
-                    let fill = if selected {
-                        colors::ACCENT.linear_multiply(0.12)
-                    } else if response.hovered() {
-                        colors::SIDEBAR_HOVER
-                    } else {
-                        colors::CARD_BG
-                    };
-                    let stroke = if selected {
-                        egui::Stroke::new(2.0_f32, colors::ACCENT)
-                    } else {
-                        egui::Stroke::new(1.0_f32, colors::SEPARATOR)
-                    };
-                    ui.painter().rect_filled(rect, 12.0, fill);
-                    ui.painter()
-                        .rect_stroke(rect, 12.0, stroke, egui::StrokeKind::Inside);
+        let mut by_host: HashMap<Uuid, Vec<&Location>> = HashMap::new();
+        for loc in &self.locations {
+            by_host.entry(loc.computer_id).or_default().push(loc);
+        }
+        for locs in by_host.values_mut() {
+            locs.sort_by_key(|l| l.sort_order);
+        }
 
-                    let icon_color = if selected {
-                        colors::ACCENT
-                    } else {
-                        colors::TEXT_SECONDARY
-                    };
-                    Icon::Folder.paint_sized(
-                        ui,
-                        rect.center() + egui::vec2(0.0, -22.0),
-                        44.0,
-                        icon_color,
-                    );
+        let tile_w = 136.0;
 
-                    let name = truncate_middle(&loc.name, 14);
-                    ui.painter().text(
-                        rect.center() + egui::vec2(0.0, 22.0),
-                        egui::Align2::CENTER_CENTER,
-                        name,
-                        egui::FontId::new(12.5, egui::FontFamily::Proportional),
-                        colors::TEXT_PRIMARY,
-                    );
-                    ui.painter().text(
-                        rect.center() + egui::vec2(0.0, 40.0),
-                        egui::Align2::CENTER_CENTER,
-                        truncate_middle(host, 14),
-                        egui::FontId::new(11.0, egui::FontFamily::Proportional),
-                        colors::TEXT_SECONDARY,
-                    );
-                }
-                if response.clicked() {
-                    pick = Some(loc.id);
-                }
-                ui.add_space(8.0);
+        for computer in &self.computers {
+            let Some(locs) = by_host.get(&computer.id) else {
+                continue;
+            };
+            if locs.is_empty() {
+                continue;
             }
 
-            // New location tile
+            let host_color = host_color(computer.id);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                Icon::Computer.ui(ui, host_color);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&computer.name)
+                            .strong()
+                            .color(colors::TEXT_PRIMARY),
+                    )
+                    .wrap(),
+                );
+            });
+            ui.add_space(6.0);
+
+            ui.horizontal_wrapped(|ui| {
+                widgets::constrain_content(ui);
+                for loc in locs {
+                    let folder_name = folder_display_name(&loc.path, &loc.name);
+                    let selected = selected_id == Some(loc.id);
+                    let payload = LocationDragPayload {
+                        location_id: loc.id,
+                        computer_id: computer.id,
+                    };
+
+                    let tile = location_tile(
+                        ui,
+                        egui::Id::new(("loc_tile", side, loc.id)),
+                        &folder_name,
+                        host_color,
+                        selected,
+                        tile_w,
+                        payload,
+                    );
+
+                    if tile.delete {
+                        delete_id = Some(loc.id);
+                    } else if tile.selected {
+                        pick = Some(loc.id);
+                    }
+                    if let Some(drag) = tile.dropped {
+                        reorder = Some((computer.id, drag.location_id, Some(loc.id)));
+                    }
+
+                    ui.add_space(8.0);
+                }
+
+                if let Some(drag) = location_tile_drop_tail(ui, computer.id) {
+                    if drag.computer_id == computer.id {
+                        reorder = Some((computer.id, drag.location_id, None));
+                    }
+                }
+            });
+            ui.add_space(14.0);
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            widgets::constrain_content(ui);
+            let tile = egui::vec2(tile_w, 112.0);
             let (rect, response) = ui.allocate_exact_size(tile, egui::Sense::click());
             if ui.is_rect_visible(rect) {
                 let fill = if response.hovered() {
@@ -1109,13 +1137,56 @@ impl FileTransferApp {
             }
         });
 
-        if let Some(id) = pick {
+        if let Some((computer_id, dragged_id, before_id)) = reorder {
+            self.reorder_location_tiles(computer_id, dragged_id, before_id);
+        }
+        if let Some(id) = delete_id {
+            self.delete_location_tile(id, side);
+        } else if let Some(id) = pick {
             self.apply_location_selection(Some(id), side);
             if side == Side::Source {
                 self.ensure_files_listed();
             }
         } else if open_new {
             self.open_location_picker(side);
+        }
+    }
+
+    fn delete_location_tile(&mut self, id: Uuid, side: Side) {
+        if self.store.delete_location(id).is_err() {
+            return;
+        }
+        if self.source_location == Some(id) {
+            self.apply_location_selection(None, Side::Source);
+        }
+        if self.dest_location == Some(id) {
+            self.apply_location_selection(None, Side::Dest);
+        }
+        self.reload_store();
+        let _ = side;
+    }
+
+    fn reorder_location_tiles(
+        &mut self,
+        computer_id: Uuid,
+        dragged_id: Uuid,
+        before_id: Option<Uuid>,
+    ) {
+        let mut ordered: Vec<(i32, Uuid)> = self
+            .locations
+            .iter()
+            .filter(|l| l.computer_id == computer_id)
+            .map(|l| (l.sort_order, l.id))
+            .collect();
+        ordered.sort_by_key(|(order, _)| *order);
+        let mut ids: Vec<Uuid> = ordered.into_iter().map(|(_, id)| id).collect();
+        ids.retain(|id| *id != dragged_id);
+        let pos = before_id
+            .and_then(|id| ids.iter().position(|existing| *existing == id))
+            .unwrap_or(ids.len());
+        ids.insert(pos, dragged_id);
+        if self.store.reorder_locations(computer_id, &ids).is_ok() {
+            self.reload_store();
         }
     }
 

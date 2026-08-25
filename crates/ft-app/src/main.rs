@@ -1,5 +1,6 @@
 mod app;
 mod icons;
+mod location_tile;
 mod theme;
 mod util;
 mod widgets;

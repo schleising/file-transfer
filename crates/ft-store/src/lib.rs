@@ -83,6 +83,7 @@ pub struct Location {
     pub name: String,
     pub path: PathBuf,
     pub kind: LocationKind,
+    pub sort_order: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -145,6 +146,7 @@ impl Store {
                 name TEXT NOT NULL,
                 path TEXT NOT NULL,
                 kind TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -164,6 +166,41 @@ impl Store {
             );
             "#,
         )?;
+        self.migrate_locations_sort_order()?;
+        Ok(())
+    }
+
+    fn migrate_locations_sort_order(&self) -> Result<()> {
+        let has_column: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('locations') WHERE name = 'sort_order'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_column == 0 {
+            self.conn.execute(
+                "ALTER TABLE locations ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM locations WHERE computer_id = ?1 ORDER BY name COLLATE NOCASE")?;
+            let computer_ids: Vec<String> = self
+                .conn
+                .prepare("SELECT id FROM computers")?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            for computer_id in computer_ids {
+                let ids = stmt
+                    .query_map(params![computer_id], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                for (index, id) in ids.iter().enumerate() {
+                    self.conn.execute(
+                        "UPDATE locations SET sort_order = ?1 WHERE id = ?2",
+                        params![index as i32, id],
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -194,14 +231,15 @@ impl Store {
         if let Some(home) = dirs::home_dir() {
             let loc_id = Uuid::new_v4();
             self.conn.execute(
-                "INSERT INTO locations (id, computer_id, name, path, kind, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO locations (id, computer_id, name, path, kind, sort_order, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     loc_id.to_string(),
                     id.to_string(),
                     "Home",
                     home.to_string_lossy(),
                     "either",
+                    0_i32,
                     now.to_rfc3339(),
                     now.to_rfc3339(),
                 ],
@@ -288,8 +326,8 @@ impl Store {
 
     pub fn locations(&self) -> Result<Vec<Location>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, computer_id, name, path, kind, created_at, updated_at
-             FROM locations ORDER BY name COLLATE NOCASE",
+            "SELECT id, computer_id, name, path, kind, sort_order, created_at, updated_at
+             FROM locations ORDER BY sort_order, name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], map_location)?;
         collect_mapped(rows)
@@ -297,8 +335,8 @@ impl Store {
 
     pub fn locations_for(&self, computer_id: Uuid) -> Result<Vec<Location>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, computer_id, name, path, kind, created_at, updated_at
-             FROM locations WHERE computer_id = ?1 ORDER BY name COLLATE NOCASE",
+            "SELECT id, computer_id, name, path, kind, sort_order, created_at, updated_at
+             FROM locations WHERE computer_id = ?1 ORDER BY sort_order, name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map(params![computer_id.to_string()], map_location)?;
         collect_mapped(rows)
@@ -306,13 +344,14 @@ impl Store {
 
     pub fn upsert_location(&self, loc: &Location) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO locations (id, computer_id, name, path, kind, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO locations (id, computer_id, name, path, kind, sort_order, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 computer_id=excluded.computer_id,
                 name=excluded.name,
                 path=excluded.path,
                 kind=excluded.kind,
+                sort_order=excluded.sort_order,
                 updated_at=excluded.updated_at",
             params![
                 loc.id.to_string(),
@@ -320,10 +359,28 @@ impl Store {
                 loc.name,
                 loc.path.to_string_lossy(),
                 loc.kind.as_str(),
+                loc.sort_order,
                 loc.created_at.to_rfc3339(),
                 loc.updated_at.to_rfc3339(),
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn reorder_locations(&self, computer_id: Uuid, ordered_ids: &[Uuid]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        for (index, id) in ordered_ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE locations SET sort_order = ?1, updated_at = ?2
+                 WHERE id = ?3 AND computer_id = ?4",
+                params![
+                    index as i32,
+                    now,
+                    id.to_string(),
+                    computer_id.to_string(),
+                ],
+            )?;
+        }
         Ok(())
     }
 
@@ -428,8 +485,9 @@ fn map_location(row: &rusqlite::Row<'_>) -> rusqlite::Result<Location> {
         name: row.get(2)?,
         path: PathBuf::from(row.get::<_, String>(3)?),
         kind: LocationKind::parse(&row.get::<_, String>(4)?),
-        created_at: parse_time(&row.get::<_, String>(5)?)?,
-        updated_at: parse_time(&row.get::<_, String>(6)?)?,
+        sort_order: row.get(5)?,
+        created_at: parse_time(&row.get::<_, String>(6)?)?,
+        updated_at: parse_time(&row.get::<_, String>(7)?)?,
     })
 }
 
@@ -475,6 +533,7 @@ mod tests {
             name: "Media".into(),
             path: PathBuf::from("/data/media"),
             kind: LocationKind::Either,
+            sort_order: 0,
             created_at: now,
             updated_at: now,
         };
