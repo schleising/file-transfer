@@ -605,14 +605,19 @@ impl eframe::App for FileTransferApp {
             .frame(theme::footer_frame())
             .show(ctx, |ui| {
                 let transferring = self.transferring;
+                let can_transfer = self.transfer_ready();
                 let cancel = self.cancel.clone();
-                widgets::progress_footer(
+                let start = widgets::progress_footer(
                     ui,
                     &self.progress,
                     transferring,
                     &self.status_line,
+                    can_transfer,
                     move || cancel.store(true, Ordering::SeqCst),
                 );
+                if start {
+                    self.start_transfer();
+                }
             });
 
         egui::SidePanel::left("sidebar")
@@ -637,13 +642,32 @@ impl eframe::App for FileTransferApp {
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
                                 widgets::constrain_content(ui);
-                                self.ui_wizard_step(ui);
+                                let scroll = matches!(
+                                    self.tab,
+                                    NavTab::Source | NavTab::Destination
+                                );
+                                if scroll {
+                                    let salt = match self.tab {
+                                        NavTab::Source => "source_scroll",
+                                        NavTab::Destination => "dest_scroll",
+                                        _ => "wizard_scroll",
+                                    };
+                                    egui::ScrollArea::vertical()
+                                        .id_salt(salt)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            widgets::constrain_content(ui);
+                                            self.ui_wizard_step(ui);
+                                        });
+                                } else {
+                                    self.ui_wizard_step(ui);
+                                }
                             },
                         );
                         let can_advance = match self.tab {
                             NavTab::Source => self.source_ready(),
                             NavTab::Files => self.files_ready(),
-                            NavTab::Destination => self.transfer_ready(),
+                            NavTab::Destination => true,
                             NavTab::History => false,
                         };
                         match widgets::wizard_nav_bar(ui, self.tab, can_advance) {
@@ -660,7 +684,6 @@ impl eframe::App for FileTransferApp {
                                     }
                                 }
                             }
-                            WizardNavAction::StartTransfer => self.start_transfer(),
                             WizardNavAction::None => {}
                         }
                     });
@@ -866,11 +889,14 @@ impl FileTransferApp {
     }
 
     fn ui_step_source(&mut self, ui: &mut egui::Ui) {
-        theme::section_heading(
+        if theme::section_heading_with_action(
             ui,
             "Source",
             Some("Choose a saved location, or add a new one."),
-        );
+            "Add location",
+        ) {
+            self.open_location_picker(Side::Source);
+        }
         ui.add_space(12.0);
         self.ui_location_tiles(ui, Side::Source);
     }
@@ -993,11 +1019,14 @@ impl FileTransferApp {
     }
 
     fn ui_step_destination(&mut self, ui: &mut egui::Ui) {
-        theme::section_heading(
+        if theme::section_heading_with_action(
             ui,
             "Destination",
             Some("Choose a saved location, or add a new one."),
-        );
+            "Add location",
+        ) {
+            self.open_location_picker(Side::Dest);
+        }
         ui.add_space(12.0);
         self.ui_location_tiles(ui, Side::Dest);
         ui.add_space(16.0);
@@ -1018,7 +1047,6 @@ impl FileTransferApp {
         };
 
         let mut pick: Option<Uuid> = None;
-        let mut open_new = false;
         let mut delete_id: Option<Uuid> = None;
         let mut reorder: Option<(Uuid, Uuid, Option<Uuid>)> = None;
 
@@ -1055,82 +1083,47 @@ impl FileTransferApp {
             });
             ui.add_space(6.0);
 
-            ui.horizontal_wrapped(|ui| {
-                widgets::constrain_content(ui);
-                for loc in locs {
-                    let folder_name = folder_display_name(&loc.path, &loc.name);
-                    let selected = selected_id == Some(loc.id);
-                    let payload = LocationDragPayload {
-                        location_id: loc.id,
-                        computer_id: computer.id,
-                    };
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true),
+                |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                    for loc in locs {
+                        let folder_name = folder_display_name(&loc.path, &loc.name);
+                        let selected = selected_id == Some(loc.id);
+                        let payload = LocationDragPayload {
+                            location_id: loc.id,
+                            computer_id: computer.id,
+                        };
 
-                    let tile = location_tile(
-                        ui,
-                        egui::Id::new(("loc_tile", side, loc.id)),
-                        &folder_name,
-                        host_color,
-                        selected,
-                        tile_w,
-                        payload,
-                    );
+                        let tile = location_tile(
+                            ui,
+                            egui::Id::new(("loc_tile", side, loc.id)),
+                            &folder_name,
+                            host_color,
+                            selected,
+                            tile_w,
+                            payload,
+                        );
 
-                    if tile.delete {
-                        delete_id = Some(loc.id);
-                    } else if tile.selected {
-                        pick = Some(loc.id);
+                        if tile.delete {
+                            delete_id = Some(loc.id);
+                        } else if tile.selected {
+                            pick = Some(loc.id);
+                        }
+                        if let Some(drag) = tile.dropped {
+                            reorder = Some((computer.id, drag.location_id, Some(loc.id)));
+                        }
                     }
-                    if let Some(drag) = tile.dropped {
-                        reorder = Some((computer.id, drag.location_id, Some(loc.id)));
-                    }
 
-                    ui.add_space(8.0);
-                }
-
-                if let Some(drag) = location_tile_drop_tail(ui, computer.id) {
-                    if drag.computer_id == computer.id {
-                        reorder = Some((computer.id, drag.location_id, None));
+                    if let Some(drag) = location_tile_drop_tail(ui, computer.id) {
+                        if drag.computer_id == computer.id {
+                            reorder = Some((computer.id, drag.location_id, None));
+                        }
                     }
-                }
-            });
+                },
+            );
             ui.add_space(14.0);
         }
-
-        ui.horizontal_wrapped(|ui| {
-            widgets::constrain_content(ui);
-            let tile = egui::vec2(tile_w, 112.0);
-            let (rect, response) = ui.allocate_exact_size(tile, egui::Sense::click());
-            if ui.is_rect_visible(rect) {
-                let fill = if response.hovered() {
-                    colors::SIDEBAR_HOVER
-                } else {
-                    colors::CARD_BG
-                };
-                ui.painter().rect_filled(rect, 12.0, fill);
-                ui.painter().rect_stroke(
-                    rect,
-                    12.0,
-                    egui::Stroke::new(1.0_f32, colors::SEPARATOR),
-                    egui::StrokeKind::Inside,
-                );
-                Icon::Plus.paint_sized(
-                    ui,
-                    rect.center() + egui::vec2(0.0, -14.0),
-                    36.0,
-                    colors::ACCENT,
-                );
-                ui.painter().text(
-                    rect.center() + egui::vec2(0.0, 28.0),
-                    egui::Align2::CENTER_CENTER,
-                    "New location",
-                    egui::FontId::new(12.0, egui::FontFamily::Proportional),
-                    colors::TEXT_PRIMARY,
-                );
-            }
-            if response.clicked() {
-                open_new = true;
-            }
-        });
 
         if let Some((computer_id, dragged_id, before_id)) = reorder {
             self.reorder_location_tiles(computer_id, dragged_id, before_id);
@@ -1142,8 +1135,6 @@ impl FileTransferApp {
             if side == Side::Source {
                 self.ensure_files_listed();
             }
-        } else if open_new {
-            self.open_location_picker(side);
         }
     }
 

@@ -42,7 +42,6 @@ pub enum WizardNavAction {
     None,
     Back,
     Next,
-    StartTransfer,
 }
 
 pub fn app_sidebar(ui: &mut Ui, selected: &mut NavTab) {
@@ -132,25 +131,31 @@ pub fn progress_footer(
     progress: &Progress,
     transferring: bool,
     status_line: &str,
+    can_transfer: bool,
     on_cancel: impl FnOnce(),
-) {
+) -> bool {
+    let mut transfer = false;
     constrain_content(ui);
-    ui.horizontal_wrapped(|ui| {
-        constrain_content(ui);
-        ui.vertical(|ui| {
-            constrain_content(ui);
+    let content_w = ui.available_width();
 
-            let status = if !status_line.is_empty() {
-                status_line.to_string()
-            } else if transferring {
-                "Transferring…".to_string()
-            } else {
-                "Ready".to_string()
-            };
+    ui.vertical(|ui| {
+        ui.set_width(content_w);
 
+        let status = if !status_line.is_empty() {
+            status_line.to_string()
+        } else if transferring {
+            "Transferring…".to_string()
+        } else {
+            "Ready".to_string()
+        };
+
+        // Status on the left, Transfer/Cancel on the right — same width as the bar below.
+        ui.horizontal(|ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if !transferring && (status_line.contains("complete") || status_line.contains("Complete")) {
+                if !transferring
+                    && (status_line.contains("complete") || status_line.contains("Complete"))
+                {
                     Icon::Checkmark.ui(ui, colors::SUCCESS);
                 } else if !transferring
                     && (status_line.contains("failed") || status_line.contains("Failed"))
@@ -163,41 +168,93 @@ pub fn progress_footer(
                         .color(colors::TEXT_PRIMARY),
                 );
             });
-
-            ui.add_space(6.0);
-            progress_bar(ui, progress, transferring);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if transferring {
+                    if secondary_button(ui, "Cancel").clicked() {
+                        on_cancel();
+                    }
+                    ui.add_space(8.0);
+                }
+                ui.add_enabled_ui(can_transfer && !transferring, |ui| {
+                    if primary_button(ui, "Transfer").clicked() {
+                        transfer = true;
+                    }
+                });
+            });
         });
 
-        if transferring {
-            if secondary_button(ui, "Cancel").clicked() {
-                on_cancel();
-            }
-        }
+        ui.add_space(6.0);
+        progress_detail(ui, progress, transferring, content_w);
+        ui.add_space(4.0);
+        progress_bar_track(ui, progress, transferring, content_w);
     });
+    transfer
 }
 
-fn progress_bar(ui: &mut Ui, progress: &Progress, transferring: bool) {
-    constrain_content(ui);
-    let rate_eta = {
-        let mut parts = Vec::new();
-        if let Some(rate) = progress.bytes_per_sec.filter(|r| *r > 0.0) {
-            parts.push(format_rate(rate));
-        }
-        if let Some(eta) = progress.eta_secs {
-            if eta == 0 && !transferring {
-                // done
-            } else if transferring {
+fn progress_detail(ui: &mut Ui, progress: &Progress, transferring: bool, width: f32) {
+    let rate_eta = progress_rate_eta(progress, transferring);
+    let frac = progress_fraction(progress, transferring);
+    let detail = progress_detail_text(progress, transferring, frac, &rate_eta);
+
+    let font = egui::FontId::new(11.5, egui::FontFamily::Proportional);
+    let galley = ui.painter().layout(
+        detail,
+        font,
+        colors::TEXT_SECONDARY,
+        width,
+    );
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(width, galley.size().y),
+        egui::Sense::hover(),
+    );
+    if ui.is_rect_visible(rect) {
+        ui.painter().galley(rect.min, galley, colors::TEXT_SECONDARY);
+    }
+}
+
+fn progress_bar_track(ui: &mut Ui, progress: &Progress, transferring: bool, width: f32) {
+    const BAR_H: f32 = 8.0;
+    let frac = progress_fraction(progress, transferring);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, BAR_H), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    ui.painter()
+        .rect_filled(rect, BAR_H * 0.5, colors::PROGRESS_TRACK);
+    let fill_w = if frac < 0.0 {
+        let pulse = (ui.input(|i| i.time) * 2.0).sin() * 0.5 + 0.5;
+        rect.width() * (0.25 + pulse as f32 * 0.35)
+    } else {
+        rect.width() * frac
+    };
+    if fill_w > 0.5 {
+        let fill = egui::Rect::from_min_size(rect.min, Vec2::new(fill_w, BAR_H));
+        ui.painter()
+            .rect_filled(fill, BAR_H * 0.5, colors::PROGRESS_FILL);
+    }
+}
+
+fn progress_rate_eta(progress: &Progress, transferring: bool) -> String {
+    let mut parts = Vec::new();
+    if let Some(rate) = progress.bytes_per_sec.filter(|r| *r > 0.0) {
+        parts.push(format_rate(rate));
+    }
+    if let Some(eta) = progress.eta_secs {
+        if eta != 0 || transferring {
+            if transferring {
                 parts.push(format!("ETA {}", format_eta(eta)));
             }
         }
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", parts.join(" · "))
-        }
-    };
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.join(" · "))
+    }
+}
 
-    let frac = if let Some(pct) = progress.percent {
+fn progress_fraction(progress: &Progress, transferring: bool) -> f32 {
+    if let Some(pct) = progress.percent {
         (pct / 100.0).clamp(0.0, 1.0)
     } else {
         match (progress.bytes_done, progress.bytes_total) {
@@ -206,9 +263,16 @@ fn progress_bar(ui: &mut Ui, progress: &Progress, transferring: bool) {
             (done, _) if done > 0 => 1.0,
             _ => 0.0,
         }
-    };
+    }
+}
 
-    let detail = if frac < 0.0 {
+fn progress_detail_text(
+    progress: &Progress,
+    _transferring: bool,
+    frac: f32,
+    rate_eta: &str,
+) -> String {
+    if frac < 0.0 {
         format!("{}{}", format_bytes(progress.bytes_done), rate_eta)
     } else {
         let pct_label = (frac * 100.0).round();
@@ -223,40 +287,6 @@ fn progress_bar(ui: &mut Ui, progress: &Progress, transferring: bool) {
                 format_bytes(progress.bytes_done)
             ),
         }
-    };
-
-    let bar_height = 8.0;
-    let font = egui::FontId::new(11.5, egui::FontFamily::Proportional);
-    let galley = ui.painter().layout(
-        detail.clone(),
-        font.clone(),
-        colors::TEXT_SECONDARY,
-        ui.available_width(),
-    );
-    let detail_height = galley.size().y;
-    let (rect, _response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), detail_height + bar_height + 6.0),
-        egui::Sense::hover(),
-    );
-    ui.painter().galley(rect.min, galley, colors::TEXT_SECONDARY);
-
-    let track = egui::Rect::from_min_size(
-        rect.min + Vec2::new(0.0, detail_height + 4.0),
-        Vec2::new(rect.width(), bar_height),
-    );
-    ui.painter()
-        .rect_filled(track, bar_height * 0.5, colors::PROGRESS_TRACK);
-
-    let fill_w = if frac < 0.0 {
-        let pulse = (ui.input(|i| i.time) * 2.0).sin() * 0.5 + 0.5;
-        track.width() * (0.25 + pulse as f32 * 0.35)
-    } else {
-        track.width() * frac
-    };
-    if fill_w > 0.5 {
-        let fill = egui::Rect::from_min_size(track.min, Vec2::new(fill_w, bar_height));
-        ui.painter()
-            .rect_filled(fill, bar_height * 0.5, colors::PROGRESS_FILL);
     }
 }
 
@@ -290,32 +320,21 @@ pub fn wizard_nav_bar(ui: &mut Ui, tab: NavTab, can_advance: bool) -> WizardNavA
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(12.0);
-    ui.horizontal(|ui| {
-        constrain_content(ui);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            match tab {
-                NavTab::Destination => {
-                    ui.add_enabled_ui(can_advance, |ui| {
-                        if primary_button(ui, "Start Transfer").clicked() {
-                            action = WizardNavAction::StartTransfer;
-                        }
-                    });
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.set_width(ui.available_width());
+        if tab.next().is_some() {
+            ui.add_enabled_ui(can_advance, |ui| {
+                if primary_button(ui, "Next").clicked() {
+                    action = WizardNavAction::Next;
                 }
-                _ => {
-                    ui.add_enabled_ui(can_advance, |ui| {
-                        if primary_button(ui, "Next").clicked() {
-                            action = WizardNavAction::Next;
-                        }
-                    });
-                }
+            });
+        }
+        if tab.prev().is_some() {
+            ui.add_space(8.0);
+            if secondary_button(ui, "Back").clicked() {
+                action = WizardNavAction::Back;
             }
-            if tab.prev().is_some() {
-                ui.add_space(8.0);
-                if secondary_button(ui, "Back").clicked() {
-                    action = WizardNavAction::Back;
-                }
-            }
-        });
+        }
     });
     action
 }

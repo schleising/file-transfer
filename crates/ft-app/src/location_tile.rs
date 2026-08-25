@@ -64,12 +64,6 @@ pub fn location_tile(
             fill = fill.linear_multiply(0.45);
         }
 
-        let stroke = if selected {
-            Stroke::new(2.0_f32, host_color)
-        } else {
-            Stroke::new(1.0_f32, colors::SEPARATOR)
-        };
-
         if tile_resp.dnd_hover_payload::<LocationDragPayload>().is_some() {
             ui.painter().rect_stroke(
                 rect.expand(2.0),
@@ -80,7 +74,17 @@ pub fn location_tile(
         }
 
         ui.painter().rect_filled(rect, 12.0, fill);
-        ui.painter().rect_stroke(rect, 12.0, stroke, StrokeKind::Inside);
+        let stroke_color = if selected {
+            host_color
+        } else {
+            colors::SEPARATOR
+        };
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            Stroke::new(2.0_f32, stroke_color),
+            StrokeKind::Inside,
+        );
 
         let icon_y = rect.top() + 36.0;
         Icon::Folder.paint_sized(
@@ -110,16 +114,19 @@ pub fn location_tile(
         Pos2::new(rect.right() - delete_size - 4.0, rect.top() + 4.0),
         Vec2::splat(delete_size),
     );
-    let delete_resp = ui.put(
-        delete_rect,
-        egui::Button::new(
-            egui::RichText::new("×")
-                .size(15.0)
-                .color(colors::TEXT_SECONDARY),
-        )
-        .frame(false)
-        .min_size(Vec2::splat(delete_size)),
-    );
+    let delete_resp = ui.interact(delete_rect, id.with("delete"), Sense::click());
+    if ui.is_rect_visible(delete_rect) {
+        Icon::Xmark.paint_sized(
+            ui,
+            delete_rect.center(),
+            12.0,
+            if delete_resp.hovered() {
+                colors::TEXT_PRIMARY
+            } else {
+                colors::TEXT_SECONDARY
+            },
+        );
+    }
 
     if delete_resp.clicked() {
         out.delete = true;

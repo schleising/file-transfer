@@ -153,3 +153,39 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
         }
     });
 }
+
+/// Title row with an optional action button aligned to the top-right.
+pub fn section_heading_with_action(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: Option<&str>,
+    action_label: &str,
+) -> bool {
+    let mut clicked = false;
+    crate::widgets::constrain_content(ui);
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .size(20.0)
+                    .strong()
+                    .color(colors::TEXT_PRIMARY),
+            );
+            if let Some(sub) = subtitle {
+                ui.add_space(2.0);
+                crate::widgets::wrapped_label(
+                    ui,
+                    egui::RichText::new(sub)
+                        .size(13.0)
+                        .color(colors::TEXT_SECONDARY),
+                );
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if crate::widgets::primary_button(ui, action_label).clicked() {
+                clicked = true;
+            }
+        });
+    });
+    clicked
+}

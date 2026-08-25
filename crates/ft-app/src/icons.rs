@@ -16,7 +16,6 @@ pub enum Icon {
     Network,
     Home,
     Refresh,
-    Plus,
 }
 
 impl Icon {
@@ -212,16 +211,6 @@ impl Icon {
                         Pos2::new(c.x + s * 0.38, c.y - s * 0.15),
                         Pos2::new(c.x + s * 0.15, c.y - s * 0.15),
                     ],
-                    stroke,
-                );
-            }
-            Icon::Plus => {
-                painter.line_segment(
-                    [Pos2::new(c.x - s * 0.4, c.y), Pos2::new(c.x + s * 0.4, c.y)],
-                    stroke,
-                );
-                painter.line_segment(
-                    [Pos2::new(c.x, c.y - s * 0.4), Pos2::new(c.x, c.y + s * 0.4)],
                     stroke,
                 );
             }
