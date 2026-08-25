@@ -27,7 +27,6 @@ enum BgMsg {
     Preflight(Result<String, String>),
     Progress(Progress),
     TransferDone(Result<(Uuid, u64, bool), String>),
-    TestHost(Result<String, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -387,10 +386,6 @@ impl FileTransferApp {
                         }
                     }
                 }
-                BgMsg::TestHost(r) => match r {
-                    Ok(m) => self.computer_msg = m,
-                    Err(e) => self.computer_msg = format!("Failed: {e}"),
-                },
             }
         }
     }

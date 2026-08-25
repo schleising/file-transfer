@@ -153,22 +153,3 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
         }
     });
 }
-
-pub fn card_section<R>(
-    ui: &mut egui::Ui,
-    title: &str,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    crate::widgets::constrain_content(ui);
-    card_frame().show(ui, |ui| {
-        crate::widgets::constrain_content(ui);
-        ui.label(
-            egui::RichText::new(title)
-                .size(14.0)
-                .strong()
-                .color(colors::TEXT_PRIMARY),
-        );
-        ui.add_space(10.0);
-        add_contents(ui)
-    }).inner
-}
