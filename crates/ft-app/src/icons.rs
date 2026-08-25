@@ -7,8 +7,6 @@ pub enum Icon {
     Transfer,
     Computer,
     Folder,
-    History,
-    ArrowRight,
     FolderOpen,
     Document,
     Checkmark,
@@ -20,10 +18,7 @@ pub enum Icon {
 
 impl Icon {
     pub fn size(self) -> f32 {
-        match self {
-            Icon::ArrowRight => 14.0,
-            _ => 18.0,
-        }
+        18.0
     }
 
     pub fn paint(self, ui: &mut Ui, rect: Rect, color: Color32) {
@@ -101,25 +96,6 @@ impl Icon {
                         stroke,
                     );
                 }
-            }
-            Icon::History => {
-                painter.circle_stroke(c, s * 0.48, stroke);
-                painter.line_segment([c, Pos2::new(c.x, c.y - s * 0.28)], stroke);
-                painter.line_segment([c, Pos2::new(c.x + s * 0.22, c.y + s * 0.05)], stroke);
-            }
-            Icon::ArrowRight => {
-                painter.line_segment(
-                    [Pos2::new(c.x - s * 0.4, c.y), Pos2::new(c.x + s * 0.35, c.y)],
-                    stroke,
-                );
-                painter.line_segment(
-                    [Pos2::new(c.x + s * 0.35, c.y), Pos2::new(c.x + s * 0.05, c.y - s * 0.28)],
-                    stroke,
-                );
-                painter.line_segment(
-                    [Pos2::new(c.x + s * 0.35, c.y), Pos2::new(c.x + s * 0.05, c.y + s * 0.28)],
-                    stroke,
-                );
             }
             Icon::Document => {
                 let r = egui::Rect::from_center_size(c, Vec2::new(s * 0.65, s * 0.85));

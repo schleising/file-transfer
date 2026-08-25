@@ -10,7 +10,7 @@ use chrono::Utc;
 use eframe::egui;
 use ft_exec::{self, DirEntry, HostRef, Progress, TransferPlan};
 use ft_mdns::Discovery;
-use ft_store::{Computer, JobRecord, JobStatus, Location, LocationKind, Store};
+use ft_store::{Computer, Location, LocationKind, Store};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +26,7 @@ enum BgMsg {
     },
     Preflight(Result<String, String>),
     Progress(Progress),
-    TransferDone(Result<(Uuid, u64, bool), String>),
+    TransferDone(Result<(u64, bool), String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -64,7 +64,6 @@ pub struct FileTransferApp {
 
     computers: Vec<Computer>,
     locations: Vec<Location>,
-    jobs: Vec<JobRecord>,
 
     source_computer: Option<Uuid>,
     source_location: Option<Uuid>,
@@ -81,7 +80,6 @@ pub struct FileTransferApp {
     preflight_ok: Option<Result<String, String>>,
     progress: Progress,
     transferring: bool,
-    active_job_id: Option<Uuid>,
     status_line: String,
     cancel: Arc<AtomicBool>,
 
@@ -110,7 +108,6 @@ impl FileTransferApp {
             tab: NavTab::Source,
             computers: vec![],
             locations: vec![],
-            jobs: vec![],
             source_computer: None,
             source_location: None,
             dest_computer: None,
@@ -123,7 +120,6 @@ impl FileTransferApp {
             preflight_ok: None,
             progress: Progress::default(),
             transferring: false,
-            active_job_id: None,
             status_line: String::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             new_name: String::new(),
@@ -146,7 +142,6 @@ impl FileTransferApp {
     fn reload_store(&mut self) {
         self.computers = self.store.computers().unwrap_or_default();
         self.locations = self.store.locations().unwrap_or_default();
-        self.jobs = self.store.jobs().unwrap_or_default();
     }
 
     fn computer(&self, id: Uuid) -> Option<&Computer> {
@@ -356,36 +351,17 @@ impl FileTransferApp {
                         self.mark_transfer_complete(bytes_done, false);
                     }
                 },
-                BgMsg::TransferDone(r) => {
-                    match r {
-                        Ok((job_id, bytes, cancelled)) => {
-                            if self.transferring || self.active_job_id == Some(job_id) {
-                                self.mark_transfer_complete(bytes, cancelled);
-                            } else if let Ok(mut jobs) = self.store.jobs() {
-                                // Background thread finished after UI already marked complete.
-                                if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                                    if job.status == JobStatus::Running {
-                                        job.finished_at = Some(Utc::now());
-                                        job.bytes_transferred = Some(bytes);
-                                        job.status = if cancelled {
-                                            JobStatus::Cancelled
-                                        } else {
-                                            JobStatus::Ok
-                                        };
-                                        let _ = self.store.update_job(job);
-                                        self.reload_store();
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            self.transferring = false;
-                            self.active_job_id = None;
-                            self.status_line = format!("Transfer failed: {e}");
-                            self.reload_store();
+                BgMsg::TransferDone(r) => match r {
+                    Ok((bytes, cancelled)) => {
+                        if self.transferring {
+                            self.mark_transfer_complete(bytes, cancelled);
                         }
                     }
-                }
+                    Err(e) => {
+                        self.transferring = false;
+                        self.status_line = format!("Transfer failed: {e}");
+                    }
+                },
             }
         }
     }
@@ -496,29 +472,7 @@ impl FileTransferApp {
             return;
         }
 
-        let sc = self.source_computer.unwrap();
-        let sl = self.source_location.unwrap();
-        let dc = self.dest_computer.unwrap();
-        let dl = self.dest_location.unwrap();
-        let job = JobRecord {
-            id: Uuid::new_v4(),
-            started_at: Utc::now(),
-            finished_at: None,
-            source_computer_id: sc,
-            source_location_id: sl,
-            dest_computer_id: dc,
-            dest_location_id: dl,
-            bytes_total: plan.bytes_total,
-            bytes_transferred: None,
-            file_count: Some(plan.file_count),
-            status: JobStatus::Running,
-            error_summary: None,
-        };
-        let job_id = job.id;
-        let _ = self.store.insert_job(&job);
-
         self.transferring = true;
-        self.active_job_id = Some(job_id);
         self.cancel.store(false, Ordering::SeqCst);
         self.progress = Progress {
             bytes_total: plan.bytes_total,
@@ -529,10 +483,7 @@ impl FileTransferApp {
 
         let tx = self.tx.clone();
         let cancel = self.cancel.clone();
-        let store_path_note = (); // privacy: no filenames to store
-        let _ = store_path_note;
 
-        // For failure updates we need store access — reopen in thread.
         std::thread::spawn(move || {
             let on_prog = {
                 let tx = tx.clone();
@@ -544,22 +495,11 @@ impl FileTransferApp {
             match result {
                 Ok(r) => {
                     let _ = tx.send(BgMsg::TransferDone(Ok((
-                        job_id,
                         r.bytes_transferred,
                         r.cancelled,
                     ))));
                 }
                 Err(e) => {
-                    if let Ok(store) = Store::open_default() {
-                        if let Ok(jobs) = store.jobs() {
-                            if let Some(mut job) = jobs.into_iter().find(|j| j.id == job_id) {
-                                job.finished_at = Some(Utc::now());
-                                job.status = JobStatus::Failed;
-                                job.error_summary = Some(truncate_err(&format!("{e:#}")));
-                                let _ = store.update_job(&job);
-                            }
-                        }
-                    }
                     let _ = tx.send(BgMsg::TransferDone(Err(truncate_err(&format!("{e:#}")))));
                 }
             }
@@ -567,30 +507,15 @@ impl FileTransferApp {
     }
 
     fn mark_transfer_complete(&mut self, bytes: u64, cancelled: bool) {
-        if !self.transferring && self.active_job_id.is_none() {
+        if !self.transferring {
             return;
         }
         self.transferring = false;
-        if let Some(job_id) = self.active_job_id.take() {
-            if let Ok(mut jobs) = self.store.jobs() {
-                if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                    job.finished_at = Some(Utc::now());
-                    job.bytes_transferred = Some(bytes);
-                    job.status = if cancelled {
-                        JobStatus::Cancelled
-                    } else {
-                        JobStatus::Ok
-                    };
-                    let _ = self.store.update_job(job);
-                }
-            }
-        }
         self.status_line = if cancelled {
             "Cancelled".into()
         } else {
             format!("Transfer complete ({})", format_bytes(bytes))
         };
-        self.reload_store();
     }
 }
 
@@ -631,65 +556,60 @@ impl eframe::App for FileTransferApp {
         egui::CentralPanel::default()
             .frame(theme::content_frame())
             .show(ctx, |ui| {
-                if self.tab.is_wizard() {
+                widgets::constrain_content(ui);
+                ui.vertical(|ui| {
                     widgets::constrain_content(ui);
-                    ui.vertical(|ui| {
-                        widgets::constrain_content(ui);
-                        const NAV_RESERVE: f32 = 68.0;
-                        let content_h = (ui.available_height() - NAV_RESERVE).max(120.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), content_h),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                widgets::constrain_content(ui);
-                                let scroll = matches!(
-                                    self.tab,
-                                    NavTab::Source | NavTab::Destination
-                                );
-                                if scroll {
-                                    let salt = match self.tab {
-                                        NavTab::Source => "source_scroll",
-                                        NavTab::Destination => "dest_scroll",
-                                        _ => "wizard_scroll",
-                                    };
-                                    egui::ScrollArea::vertical()
-                                        .id_salt(salt)
-                                        .auto_shrink([false, false])
-                                        .show(ui, |ui| {
-                                            widgets::constrain_content(ui);
-                                            self.ui_wizard_step(ui);
-                                        });
-                                } else {
-                                    self.ui_wizard_step(ui);
-                                }
-                            },
-                        );
-                        let can_advance = match self.tab {
-                            NavTab::Source => self.source_ready(),
-                            NavTab::Files => self.files_ready(),
-                            NavTab::Destination => true,
-                            NavTab::History => false,
-                        };
-                        match widgets::wizard_nav_bar(ui, self.tab, can_advance) {
-                            WizardNavAction::Back => {
-                                if let Some(prev) = self.tab.prev() {
-                                    self.tab = prev;
-                                }
+                    const NAV_RESERVE: f32 = 68.0;
+                    let content_h = (ui.available_height() - NAV_RESERVE).max(120.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), content_h),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            widgets::constrain_content(ui);
+                            let scroll = matches!(
+                                self.tab,
+                                NavTab::Source | NavTab::Destination
+                            );
+                            if scroll {
+                                let salt = match self.tab {
+                                    NavTab::Source => "source_scroll",
+                                    NavTab::Destination => "dest_scroll",
+                                    _ => "wizard_scroll",
+                                };
+                                egui::ScrollArea::vertical()
+                                    .id_salt(salt)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        widgets::constrain_content(ui);
+                                        self.ui_wizard_step(ui);
+                                    });
+                            } else {
+                                self.ui_wizard_step(ui);
                             }
-                            WizardNavAction::Next => {
-                                if let Some(next) = self.tab.next() {
-                                    self.tab = next;
-                                    if self.tab == NavTab::Files {
-                                        self.ensure_files_listed();
-                                    }
-                                }
+                        },
+                    );
+                    let can_advance = match self.tab {
+                        NavTab::Source => self.source_ready(),
+                        NavTab::Files => self.files_ready(),
+                        NavTab::Destination => true,
+                    };
+                    match widgets::wizard_nav_bar(ui, self.tab, can_advance) {
+                        WizardNavAction::Back => {
+                            if let Some(prev) = self.tab.prev() {
+                                self.tab = prev;
                             }
-                            WizardNavAction::None => {}
                         }
-                    });
-                } else {
-                    widgets::page_body(ui, |ui| self.ui_history(ui));
-                }
+                        WizardNavAction::Next => {
+                            if let Some(next) = self.tab.next() {
+                                self.tab = next;
+                                if self.tab == NavTab::Files {
+                                    self.ensure_files_listed();
+                                }
+                            }
+                        }
+                        WizardNavAction::None => {}
+                    }
+                });
             });
 
         self.ui_folder_browser(ctx);
@@ -884,7 +804,6 @@ impl FileTransferApp {
                 self.ui_step_files(ui);
             }
             NavTab::Destination => self.ui_step_destination(ui),
-            NavTab::History => {}
         }
     }
 
@@ -1459,122 +1378,5 @@ impl FileTransferApp {
                 }
             }
         }
-    }
-
-    fn ui_history(&mut self, ui: &mut egui::Ui) {
-        widgets::constrain_content(ui);
-        theme::section_heading(
-            ui,
-            "History",
-            Some("Job metadata only — transferred filenames are never stored."),
-        );
-        ui.add_space(12.0);
-
-        ui.horizontal(|ui| {
-            if widgets::secondary_button(ui, "Refresh").clicked() {
-                self.reload_store();
-            }
-        });
-        ui.add_space(8.0);
-
-        theme::card_frame().show(ui, |ui| {
-            widgets::constrain_content(ui);
-            if self.jobs.is_empty() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(32.0);
-                    Icon::History.ui(ui, colors::TEXT_SECONDARY);
-                    ui.label(
-                        egui::RichText::new("No transfers yet")
-                            .color(colors::TEXT_SECONDARY),
-                    );
-                });
-            } else {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                    widgets::constrain_content(ui);
-                    for j in &self.jobs {
-                        let src = self
-                            .computer(j.source_computer_id)
-                            .map(|c| c.name.as_str())
-                            .unwrap_or("?");
-                        let dst = self
-                            .computer(j.dest_computer_id)
-                            .map(|c| c.name.as_str())
-                            .unwrap_or("?");
-                        let sl = self
-                            .location(j.source_location_id)
-                            .map(|l| l.name.as_str())
-                            .unwrap_or("?");
-                        let dl = self
-                            .location(j.dest_location_id)
-                            .map(|l| l.name.as_str())
-                            .unwrap_or("?");
-
-                        ui.horizontal_wrapped(|ui| {
-                            widgets::constrain_content(ui);
-                            ui.vertical(|ui| {
-                                ui.set_max_width(ui.available_width());
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("{src}/{sl}"))
-                                            .strong()
-                                            .color(colors::TEXT_PRIMARY),
-                                    );
-                                    Icon::ArrowRight.ui(ui, colors::TEXT_SECONDARY);
-                                    ui.label(
-                                        egui::RichText::new(format!("{dst}/{dl}"))
-                                            .strong()
-                                            .color(colors::TEXT_PRIMARY),
-                                    );
-                                });
-                                ui.label(
-                                    egui::RichText::new(
-                                        j.started_at.format("%Y-%m-%d %H:%M").to_string(),
-                                    )
-                                    .size(12.0)
-                                    .color(colors::TEXT_SECONDARY),
-                                );
-                            });
-                            let st = match j.status {
-                                JobStatus::Ok => "OK",
-                                JobStatus::Failed => "Failed",
-                                JobStatus::Cancelled => "Cancelled",
-                                JobStatus::Running => "Running",
-                            };
-                            widgets::status_badge(ui, st);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}  ·  {} files",
-                                    j.bytes_transferred
-                                        .map(format_bytes)
-                                        .unwrap_or_else(|| "—".into()),
-                                    j.file_count
-                                        .map(|n| n.to_string())
-                                        .unwrap_or_else(|| "—".into()),
-                                ))
-                                .size(12.0)
-                                .color(colors::TEXT_SECONDARY),
-                            );
-                        });
-                        if let Some(err) = &j.error_summary {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                Icon::Xmark.ui(ui, colors::ERROR);
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(err).color(colors::ERROR),
-                                    )
-                                    .wrap(),
-                                );
-                            });
-                        }
-                        ui.add_space(12.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-                    }
-                });
-            }
-        });
     }
 }

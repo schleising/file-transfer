@@ -1,5 +1,4 @@
-//! Persist computers, locations, and job metadata.
-//! Never store transferred filenames (privacy rule).
+//! Persist computers and saved locations.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -33,34 +32,6 @@ impl LocationKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JobStatus {
-    Running,
-    Ok,
-    Failed,
-    Cancelled,
-}
-
-impl JobStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Ok => "ok",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    fn parse(s: &str) -> Self {
-        match s {
-            "running" => Self::Running,
-            "ok" => Self::Ok,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Failed,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Computer {
     pub id: Uuid,
@@ -86,23 +57,6 @@ pub struct Location {
     pub sort_order: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobRecord {
-    pub id: Uuid,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-    pub source_computer_id: Uuid,
-    pub source_location_id: Uuid,
-    pub dest_computer_id: Uuid,
-    pub dest_location_id: Uuid,
-    pub bytes_total: Option<u64>,
-    pub bytes_transferred: Option<u64>,
-    pub file_count: Option<u64>,
-    pub status: JobStatus,
-    /// High-level error only — must not contain filenames.
-    pub error_summary: Option<String>,
 }
 
 pub struct Store {
@@ -150,20 +104,7 @@ impl Store {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY NOT NULL,
-                started_at TEXT NOT NULL,
-                finished_at TEXT,
-                source_computer_id TEXT NOT NULL,
-                source_location_id TEXT NOT NULL,
-                dest_computer_id TEXT NOT NULL,
-                dest_location_id TEXT NOT NULL,
-                bytes_total INTEGER,
-                bytes_transferred INTEGER,
-                file_count INTEGER,
-                status TEXT NOT NULL,
-                error_summary TEXT
-            );
+            DROP TABLE IF EXISTS jobs;
             "#,
         )?;
         self.migrate_locations_sort_order()?;
@@ -389,71 +330,6 @@ impl Store {
             .execute("DELETE FROM locations WHERE id = ?1", params![id.to_string()])?;
         Ok(())
     }
-
-    pub fn insert_job(&self, job: &JobRecord) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO jobs (id, started_at, finished_at, source_computer_id, source_location_id,
-             dest_computer_id, dest_location_id, bytes_total, bytes_transferred, file_count, status, error_summary)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![
-                job.id.to_string(),
-                job.started_at.to_rfc3339(),
-                job.finished_at.map(|t| t.to_rfc3339()),
-                job.source_computer_id.to_string(),
-                job.source_location_id.to_string(),
-                job.dest_computer_id.to_string(),
-                job.dest_location_id.to_string(),
-                job.bytes_total.map(|b| b as i64),
-                job.bytes_transferred.map(|b| b as i64),
-                job.file_count.map(|b| b as i64),
-                job.status.as_str(),
-                job.error_summary,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_job(&self, job: &JobRecord) -> Result<()> {
-        self.conn.execute(
-            "UPDATE jobs SET finished_at=?2, bytes_total=?3, bytes_transferred=?4, file_count=?5,
-             status=?6, error_summary=?7 WHERE id=?1",
-            params![
-                job.id.to_string(),
-                job.finished_at.map(|t| t.to_rfc3339()),
-                job.bytes_total.map(|b| b as i64),
-                job.bytes_transferred.map(|b| b as i64),
-                job.file_count.map(|b| b as i64),
-                job.status.as_str(),
-                job.error_summary,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn jobs(&self) -> Result<Vec<JobRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, started_at, finished_at, source_computer_id, source_location_id,
-             dest_computer_id, dest_location_id, bytes_total, bytes_transferred, file_count, status, error_summary
-             FROM jobs ORDER BY started_at DESC LIMIT 200",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(JobRecord {
-                id: parse_uuid(&row.get::<_, String>(0)?)?,
-                started_at: parse_time(&row.get::<_, String>(1)?)?,
-                finished_at: parse_opt_time(row.get(2)?)?,
-                source_computer_id: parse_uuid(&row.get::<_, String>(3)?)?,
-                source_location_id: parse_uuid(&row.get::<_, String>(4)?)?,
-                dest_computer_id: parse_uuid(&row.get::<_, String>(5)?)?,
-                dest_location_id: parse_uuid(&row.get::<_, String>(6)?)?,
-                bytes_total: row.get::<_, Option<i64>>(7)?.map(|b| b as u64),
-                bytes_transferred: row.get::<_, Option<i64>>(8)?.map(|b| b as u64),
-                file_count: row.get::<_, Option<i64>>(9)?.map(|b| b as u64),
-                status: JobStatus::parse(&row.get::<_, String>(10)?),
-                error_summary: row.get(11)?,
-            })
-        })?;
-        collect_mapped(rows)
-    }
 }
 
 fn app_data_dir() -> Result<PathBuf> {
@@ -507,7 +383,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_computer_location_job() {
+    fn roundtrip_computer_location() {
         let store = Store::open(":memory:").unwrap();
         let local = store.local_computer().unwrap();
         assert!(local.is_local);
@@ -539,22 +415,5 @@ mod tests {
         };
         store.upsert_location(&loc).unwrap();
         assert_eq!(store.locations_for(remote.id).unwrap().len(), 1);
-
-        let job = JobRecord {
-            id: Uuid::new_v4(),
-            started_at: now,
-            finished_at: Some(now),
-            source_computer_id: local.id,
-            source_location_id: loc.id,
-            dest_computer_id: remote.id,
-            dest_location_id: loc.id,
-            bytes_total: Some(100),
-            bytes_transferred: Some(100),
-            file_count: Some(2),
-            status: JobStatus::Ok,
-            error_summary: None,
-        };
-        store.insert_job(&job).unwrap();
-        assert_eq!(store.jobs().unwrap().len(), 1);
     }
 }

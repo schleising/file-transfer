@@ -11,7 +11,6 @@ pub enum NavTab {
     Source,
     Files,
     Destination,
-    History,
 }
 
 impl NavTab {
@@ -20,7 +19,6 @@ impl NavTab {
             NavTab::Source => None,
             NavTab::Files => Some(NavTab::Source),
             NavTab::Destination => Some(NavTab::Files),
-            NavTab::History => None,
         }
     }
 
@@ -29,12 +27,7 @@ impl NavTab {
             NavTab::Source => Some(NavTab::Files),
             NavTab::Files => Some(NavTab::Destination),
             NavTab::Destination => None,
-            NavTab::History => None,
         }
-    }
-
-    pub fn is_wizard(self) -> bool {
-        matches!(self, NavTab::Source | NavTab::Files | NavTab::Destination)
     }
 }
 
@@ -62,12 +55,6 @@ pub fn app_sidebar(ui: &mut Ui, selected: &mut NavTab) {
         nav_item(ui, selected, NavTab::Source, Icon::Computer, "Source");
         nav_item(ui, selected, NavTab::Files, Icon::Document, "Files");
         nav_item(ui, selected, NavTab::Destination, Icon::Folder, "Destination");
-
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-        nav_item(ui, selected, NavTab::History, Icon::History, "History");
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
             ui.add_space(8.0);
@@ -301,18 +288,6 @@ pub fn wrapped_label(ui: &mut Ui, text: impl Into<RichText>) {
     ui.add(egui::Label::new(text.into()).wrap());
 }
 
-pub fn page_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
-    constrain_content(ui);
-    egui::ScrollArea::vertical()
-        .id_salt("page_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            constrain_content(ui);
-            add_contents(ui)
-        })
-        .inner
-}
-
 /// Main content area for wizard steps — no scroll wrapper, respects panel margins.
 pub fn wizard_nav_bar(ui: &mut Ui, tab: NavTab, can_advance: bool) -> WizardNavAction {
     constrain_content(ui);
@@ -413,27 +388,4 @@ pub fn status_message(ui: &mut Ui, result: &Result<String, String>) {
             });
         }
     }
-}
-
-pub fn status_badge(ui: &mut Ui, status: &str) {
-    let (bg, fg) = match status {
-        "OK" | "Ok" => (colors::SUCCESS.linear_multiply(0.15), colors::SUCCESS),
-        "Failed" => (colors::ERROR.linear_multiply(0.15), colors::ERROR),
-        "Cancelled" => (
-            Color32::from_rgb(255, 149, 0).linear_multiply(0.15),
-            Color32::from_rgb(255, 149, 0),
-        ),
-        "Running" => (colors::ACCENT.linear_multiply(0.15), colors::ACCENT),
-        _ => (colors::PROGRESS_TRACK, colors::TEXT_SECONDARY),
-    };
-    let galley = ui.painter().layout_no_wrap(
-        status.to_string(),
-        egui::FontId::new(11.0, egui::FontFamily::Proportional),
-        fg,
-    );
-    let pad = Vec2::new(8.0, 3.0);
-    let size = galley.size() + pad * 2.0;
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    ui.painter().rect_filled(rect, 6.0, bg);
-    ui.painter().galley(rect.min + pad, galley, fg);
 }
