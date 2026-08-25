@@ -47,3 +47,20 @@ pub fn truncate_err(s: &str) -> String {
     }
     t
 }
+
+pub fn truncate_middle(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".into();
+    }
+    let keep = max_chars - 1;
+    let left = keep / 2;
+    let right = keep - left;
+    let mut out: String = chars[..left].iter().collect();
+    out.push('…');
+    out.extend(chars[chars.len() - right..].iter());
+    out
+}

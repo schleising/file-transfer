@@ -149,19 +149,15 @@ pub fn progress_footer(
             };
 
             ui.horizontal(|ui| {
-                constrain_content(ui);
-                if transferring {
-                    ui.spinner();
-                    ui.add_space(4.0);
-                } else if status_line.contains("complete") || status_line.contains("Complete") {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if !transferring && (status_line.contains("complete") || status_line.contains("Complete")) {
                     Icon::Checkmark.ui(ui, colors::SUCCESS);
-                    ui.add_space(2.0);
-                } else if status_line.contains("failed") || status_line.contains("Failed") {
+                } else if !transferring
+                    && (status_line.contains("failed") || status_line.contains("Failed"))
+                {
                     Icon::Xmark.ui(ui, colors::ERROR);
-                    ui.add_space(2.0);
                 }
-                wrapped_label(
-                    ui,
+                ui.label(
                     RichText::new(status)
                         .size(13.0)
                         .color(colors::TEXT_PRIMARY),
@@ -272,7 +268,6 @@ pub fn constrain_content(ui: &mut Ui) {
 }
 
 pub fn wrapped_label(ui: &mut Ui, text: impl Into<RichText>) {
-    constrain_content(ui);
     ui.add(egui::Label::new(text.into()).wrap());
 }
 
@@ -373,7 +368,8 @@ pub fn secondary_button(ui: &mut Ui, label: &str) -> egui::Response {
 }
 
 pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> egui::Response {
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
         icon.ui(ui, colors::TEXT_SECONDARY);
         secondary_button(ui, label)
     })
@@ -384,15 +380,17 @@ pub fn status_message(ui: &mut Ui, result: &Result<String, String>) {
     constrain_content(ui);
     match result {
         Ok(m) => {
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
                 Icon::Checkmark.ui(ui, colors::SUCCESS);
-                wrapped_label(ui, RichText::new(m).color(colors::SUCCESS));
+                ui.label(RichText::new(m).color(colors::SUCCESS));
             });
         }
         Err(e) => {
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
                 Icon::Xmark.ui(ui, colors::ERROR);
-                wrapped_label(ui, RichText::new(e).color(colors::ERROR));
+                ui.add(egui::Label::new(RichText::new(e).color(colors::ERROR)).wrap());
             });
         }
     }

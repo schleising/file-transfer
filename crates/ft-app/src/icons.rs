@@ -16,6 +16,7 @@ pub enum Icon {
     Network,
     Home,
     Refresh,
+    Plus,
 }
 
 impl Icon {
@@ -214,7 +215,22 @@ impl Icon {
                     stroke,
                 );
             }
+            Icon::Plus => {
+                painter.line_segment(
+                    [Pos2::new(c.x - s * 0.4, c.y), Pos2::new(c.x + s * 0.4, c.y)],
+                    stroke,
+                );
+                painter.line_segment(
+                    [Pos2::new(c.x, c.y - s * 0.4), Pos2::new(c.x, c.y + s * 0.4)],
+                    stroke,
+                );
+            }
         }
+    }
+
+    pub fn paint_sized(self, ui: &mut Ui, center: Pos2, size: f32, color: Color32) {
+        let rect = Rect::from_center_size(center, Vec2::splat(size));
+        self.paint(ui, rect, color);
     }
 
     pub fn ui(self, ui: &mut Ui, color: Color32) -> Response {
