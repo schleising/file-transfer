@@ -64,6 +64,13 @@
   box-sizing: border-box;
 }
 
+svg.glyph {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex-shrink: 0;
+}
+
 html,
 body,
 #main {
@@ -256,25 +263,37 @@ textarea {
   margin-top: 8px;
 }
 
-.host-block {
-  margin-bottom: 22px;
+.host-block + .host-block {
+  margin-top: 18px;
 }
 
 .host-label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  margin: 0 0 10px;
+  color: var(--secondary);
+  font-size: 11px;
   font-weight: 600;
-  margin-bottom: 10px;
-  color: var(--label);
+  letter-spacing: 0.02em;
 }
 
-.host-swatch {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--host);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--host) 22%, transparent);
+.host-label svg {
+  width: 12px;
+  height: 12px;
+  color: var(--host);
+  flex-shrink: 0;
+}
+
+.host-label span {
+  flex-shrink: 0;
+}
+
+.host-rule {
+  flex: 1;
+  height: 0.5px;
+  background: var(--separator);
+  min-width: 16px;
 }
 
 .tiles {

@@ -312,9 +312,9 @@ fn LocationTiles(side: Side) -> Element {
                         key: "{computer.id}",
                         style: "--host: {color}",
                         div { class: "host-label",
-                            span { class: "host-swatch" }
                             Icon { kind: Glyph::Computer }
                             span { "{computer.name}" }
+                            div { class: "host-rule" }
                         }
                         div { class: "tiles",
                             for loc in locs {
