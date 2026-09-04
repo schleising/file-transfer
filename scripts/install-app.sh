@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
-echo "Building release binary…"
+echo "Building release binary..."
 cargo build --release -p ft-app
 
 BIN="$CARGO_TARGET_DIR/release/ft-app"
@@ -54,8 +54,8 @@ PLIST
 echo "Assembled: $APP_DIR"
 
 DEST="/Applications/File Transfer.app"
-echo "Installing to $DEST…"
+echo "Installing to ${DEST}..."
 rm -rf "$DEST"
 cp -R "$APP_DIR" "$DEST"
-echo "Done. Opening…"
+echo "Done. Opening..."
 open "$DEST"
