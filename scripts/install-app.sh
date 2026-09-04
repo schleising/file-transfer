@@ -20,6 +20,13 @@ mkdir -p "$MACOS" "$RES"
 cp "$BIN" "$MACOS/file-transfer"
 chmod +x "$MACOS/file-transfer"
 
+ICON="$ROOT/crates/ft-app/assets/AppIcon.icns"
+if [[ ! -f "$ICON" ]]; then
+  echo "Missing app icon: $ICON" >&2
+  exit 1
+fi
+cp "$ICON" "$RES/AppIcon.icns"
+
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -43,6 +50,8 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <string>0.1.0</string>
   <key>CFBundleVersion</key>
   <string>0.1.0</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
@@ -57,5 +66,6 @@ DEST="/Applications/File Transfer.app"
 echo "Installing to ${DEST}..."
 rm -rf "$DEST"
 cp -R "$APP_DIR" "$DEST"
+touch "$DEST"
 echo "Done. Opening..."
 open "$DEST"
