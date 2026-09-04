@@ -1,3 +1,6 @@
+use std::path::Path;
+use uuid::Uuid;
+
 pub fn format_bytes(n: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -48,24 +51,76 @@ pub fn truncate_err(s: &str) -> String {
     t
 }
 
-pub fn folder_display_name(path: &std::path::Path, fallback: &str) -> String {
+pub fn folder_display_name(path: &Path, fallback: &str) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| fallback.to_string())
 }
 
-pub fn host_color(computer_id: uuid::Uuid) -> egui::Color32 {
-    const PALETTE: [egui::Color32; 8] = [
-        egui::Color32::from_rgb(0, 122, 255),
-        egui::Color32::from_rgb(255, 149, 0),
-        egui::Color32::from_rgb(52, 199, 89),
-        egui::Color32::from_rgb(175, 82, 222),
-        egui::Color32::from_rgb(255, 45, 85),
-        egui::Color32::from_rgb(90, 200, 250),
-        egui::Color32::from_rgb(255, 204, 0),
-        egui::Color32::from_rgb(162, 132, 94),
+pub fn host_color(computer_id: Uuid) -> &'static str {
+    const PALETTE: [&str; 8] = [
+        "#007AFF", "#FF9500", "#34C759", "#AF52DE", "#FF2D55", "#5AC8FA", "#FFCC00", "#A2845E",
     ];
-    let idx = (computer_id.as_u128() as usize) % PALETTE.len();
-    PALETTE[idx]
+    PALETTE[(computer_id.as_u128() as usize) % PALETTE.len()]
+}
+
+pub fn progress_fraction(progress: &ft_exec::Progress, transferring: bool) -> f32 {
+    if let Some(pct) = progress.percent {
+        (pct / 100.0).clamp(0.0, 1.0)
+    } else {
+        match (progress.bytes_done, progress.bytes_total) {
+            (done, Some(total)) if total > 0 => (done as f32 / total as f32).clamp(0.0, 1.0),
+            _ if transferring => -1.0,
+            (done, _) if done > 0 => 1.0,
+            _ => 0.0,
+        }
+    }
+}
+
+pub fn progress_detail(progress: &ft_exec::Progress, transferring: bool) -> String {
+    let frac = progress_fraction(progress, transferring);
+    let mut rate_eta = Vec::new();
+    if let Some(rate) = progress.bytes_per_sec.filter(|r| *r > 0.0) {
+        rate_eta.push(format_rate(rate));
+    }
+    if let Some(eta) = progress.eta_secs {
+        if transferring && (eta != 0 || transferring) {
+            rate_eta.push(format!("ETA {}", format_eta(eta)));
+        }
+    }
+    let suffix = if rate_eta.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", rate_eta.join(" · "))
+    };
+
+    if frac < 0.0 {
+        format!("{}{}", format_bytes(progress.bytes_done), suffix)
+    } else {
+        let pct_label = (frac * 100.0).round();
+        match progress.bytes_total {
+            Some(t) => format!(
+                "{} / {} ({pct_label:.0}%){suffix}",
+                format_bytes(progress.bytes_done),
+                format_bytes(t),
+            ),
+            None => format!(
+                "{} ({pct_label:.0}%){suffix}",
+                format_bytes(progress.bytes_done)
+            ),
+        }
+    }
+}
+
+pub fn status_kind(status_line: &str, transferring: bool) -> &'static str {
+    if transferring {
+        "busy"
+    } else if status_line.contains("complete") || status_line.contains("Complete") {
+        "ok"
+    } else if status_line.contains("failed") || status_line.contains("Failed") {
+        "err"
+    } else {
+        "idle"
+    }
 }

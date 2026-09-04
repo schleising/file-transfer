@@ -99,7 +99,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 ### Controller
 
-- macOS only; **egui (eframe)** GUI.
+- macOS only; **Dioxus desktop** GUI (WKWebView, macOS-native styling).
 - Install: `./scripts/install-app.sh` → `cargo build --release -p ft-app`, assemble minimal `.app`, copy to `/Applications`.
 - Local rsync: `/opt/homebrew/bin/rsync` then `/usr/local/bin/rsync` (never prefer system `/usr/bin/rsync` when Homebrew exists).
 - Data dir: `~/Library/Application Support/File Transfer/` (SQLite).
@@ -270,7 +270,7 @@ On first open, a **This Mac** computer and a **Home** location are created autom
 
 ```
 crates/
-  ft-app/     egui UI, background jobs, folder pickers, install target binary
+  ft-app/     Dioxus UI, background jobs, folder pickers, install target binary
   ft-exec/    ssh/rsync, listing, expand folders, progress parse, peer probe
   ft-store/   SQLite computers / locations / jobs
   ft-mdns/    _ssh._tcp browse (mdns-sd)
@@ -279,7 +279,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 | Crate | Role |
 |-------|------|
-| `ft-app` | eframe UI; `rfd` native picker; SSH browse window; wires store + exec + mdns |
+| `ft-app` | Dioxus UI; `rfd` native picker; SSH browse sheet; wires store + exec + mdns |
 | `ft-exec` | All process orchestration and progress |
 | `ft-store` | Persistence + privacy boundary |
 | `ft-mdns` | Discovery snapshot for the Computers tab |
@@ -288,11 +288,11 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 ## 12. GUI details
 
-- Toolkit: **egui / eframe** with a macOS-inspired light theme (system blue accent `#007AFF`, card layout, rounded corners).
-- Layout: **sidebar navigation** (Transfer, Computers, Locations, History); **persistent bottom progress bar** on all tabs (status, bytes, rate, ETA, Cancel while transferring).
-- Icons: custom vector icons (SF Symbol–style) for nav, folders, files, network, status.
-- Transfer: card sections for Source / Files / Destination; combined location dropdowns; primary **Start Transfer** action.
-- Progress footer: custom bar (not egui default); shows on every tab.
+- Toolkit: **Dioxus desktop** (WKWebView) with a macOS System Settings–style layout, SF Pro / `-apple-system` type, system accent, light and dark appearance.
+- Layout: **sidebar navigation** (Source, Files, Destination) under a transparent titlebar; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel while transferring).
+- Icons: SF Symbol–style inline SVGs for nav, folders, files, network, status.
+- Transfer: Finder-like location tiles and file list; primary **Transfer** action in the footer.
+- Progress footer: capsule progress bar; shows on every step.
 - Packaging: minimal `Info.plist` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
 
 ---
@@ -328,7 +328,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 | Area | Status |
 |------|--------|
-| Workspace crates + egui app | Done |
+| Workspace crates + Dioxus app | Done |
 | Store + This Mac / Home defaults | Done |
 | Local ↔ remote ↔ remote→remote (push/pull) | Done |
 | Bonjour `_ssh._tcp` + save | Done |
@@ -358,7 +358,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 | Topic | Decision / as-built |
 |-------|---------------------|
-| GUI | **egui (eframe)** |
+| GUI | **Dioxus desktop** (macOS-styled WKWebView) |
 | Remote→remote | Probe both; **prefer push** |
 | Progress | Preflight total + parse **progress2 from stdout** (`\r`); `--outbuf=N`; drain both pipes; rate/ETA; **complete UI on payload done** |
 | Locations (Transfer tab) | **Single dropdown per side**: `Host — Folder (path)`; browse/path adds saved locations |
