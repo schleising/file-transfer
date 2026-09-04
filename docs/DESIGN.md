@@ -207,7 +207,7 @@ Relative structure under the destination folder is preserved.
 2. **Bar** — prefers rsync’s own **percent** from progress2 when available; otherwise `bytes_done / bytes_total`. Shows **transfer rate** and **ETA** when parsed or derivable. Indeterminate animation if total unknown.
 3. **Parsing** — progress2 lines like `bytes  pct  rate  time (xfr#N, to-chk=L/T)`; extract bytes, percent, rate (`KB/s`/`MB/s`/…), and `to-chk` / `ir-chk` for completion detection.
 4. **Stream handling** — drain **both stdout and stderr**; split on `\r` and `\n`. On rsync 3.x with piped I/O, progress2 goes to **stdout** (not stderr). Failing to drain either pipe can **block rsync** (historically stderr; stdout null also caused stalls). Use `--outbuf=N` on the client.
-5. **Completion semantics** — payload is **done** when rsync reports any of: `100%`, `to-chk=0`, or progress stalls at ≥99% / ≥95% of preflight bytes for ~1.2s. The UI marks the job complete immediately (`data_complete`); the executor returns without waiting for SSH session teardown. A background thread keeps draining pipes and reaps the child (SIGKILL after a few seconds if stuck).
+5. **Completion semantics** — the UI may show 100% when progress2 reports `to-chk=0`. The transfer is only **successful** after rsync/ssh **exits 0**. Do not SIGKILL on `100%` or a progress stall: that can truncate the last file in a folder (`--inplace`). Drain both pipes until the child exits (cancel still kills the controller-side child).
 6. **Remote→remote** — orchestration SSH uses `-tt`; remote script prefers `stdbuf -oL` around rsync so progress streams instead of buffering until session exit.
 7. UI repaints on background progress messages while a transfer runs.
 8. Filenames are not persisted; optional in-memory “current file” is not used for progress2.
@@ -318,7 +318,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Size preflight fails | OK | Indeterminate progress allowed |
 | Stderr pipe not drained (historical bug) | — | Fixed: blocked after first file |
 | Stdout not drained / progress on stdout (rsync 3.x) | — | Fixed: pipe stdout; `--outbuf=N` |
-| Long pause at 100% waiting for SSH teardown | — | Fixed: complete on progress2 done; reap in background |
+| Long pause at 100% waiting for SSH teardown | — | UI can show 100% on `to-chk=0`; rsync is allowed to exit before success |
 | Missing Homebrew rsync on controller | OK | Local rsync ops fail with install hint |
 | Cancel | OK | Kill child; status cancelled |
 
@@ -334,7 +334,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Bonjour `_ssh._tcp` + save | Done |
 | Native + SSH folder browse | Done |
 | Progress2 parse + dual-stream drain + `--inplace` + `--outbuf=N` | Done |
-| Progress rate/ETA + early UI completion on payload done | Done |
+| Progress rate/ETA; wait for rsync exit (do not kill on 100%) | Done |
 | Transfer tab: combined host/folder location quick-select | Done |
 | Folder expand for `--files-from` | Done |
 | Install script → `/Applications` | Done |
@@ -360,7 +360,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 |-------|---------------------|
 | GUI | **Dioxus desktop** (macOS-styled WKWebView) |
 | Remote→remote | Probe both; **prefer push** |
-| Progress | Preflight total + parse **progress2 from stdout** (`\r`); `--outbuf=N`; drain both pipes; rate/ETA; **complete UI on payload done** |
+| Progress | Preflight total + parse **progress2 from stdout** (`\r`); `--outbuf=N`; drain both pipes; rate/ETA; **wait for rsync exit** |
 | Locations (Transfer tab) | **Single dropdown per side**: `Host — Folder (path)`; browse/path adds saved locations |
 | DNS-SD | **`_ssh._tcp` only** |
 | App name / run mode | **File Transfer.app** in `/Applications` |

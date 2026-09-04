@@ -39,7 +39,7 @@ pub struct Progress {
     pub eta_secs: Option<u64>,
     /// Rsync's own progress percent (0–100), when parsed from progress2.
     pub percent: Option<f32>,
-    /// True once rsync reports `100%` with `to-chk=0` (payload done; process may still exit).
+    /// True once rsync reports `to-chk=0` (UI may show complete; process still runs to exit).
     pub data_complete: bool,
 }
 
@@ -73,10 +73,7 @@ pub struct TransferResult {
 }
 
 pub fn find_homebrew_rsync() -> Result<PathBuf> {
-    for candidate in [
-        "/opt/homebrew/bin/rsync",
-        "/usr/local/bin/rsync",
-    ] {
+    for candidate in ["/opt/homebrew/bin/rsync", "/usr/local/bin/rsync"] {
         let p = PathBuf::from(candidate);
         if p.is_file() {
             return Ok(p);
@@ -90,9 +87,7 @@ pub fn find_homebrew_rsync() -> Result<PathBuf> {
             return Ok(PathBuf::from(path));
         }
         if path == "/usr/bin/rsync" {
-            bail!(
-                "only system /usr/bin/rsync found; install Homebrew rsync: brew install rsync"
-            );
+            bail!("only system /usr/bin/rsync found; install Homebrew rsync: brew install rsync");
         }
     }
     bail!("Homebrew rsync not found; run: brew install rsync");
@@ -236,9 +231,7 @@ pub fn list_dir(host: &HostRef, path: &Path) -> Result<Vec<DirEntry>> {
 
 fn list_dir_local(path: &Path) -> Result<Vec<DirEntry>> {
     let mut entries = Vec::new();
-    for ent in std::fs::read_dir(path)
-        .with_context(|| format!("read_dir {}", path.display()))?
-    {
+    for ent in std::fs::read_dir(path).with_context(|| format!("read_dir {}", path.display()))? {
         let ent = ent?;
         let meta = ent.metadata()?;
         let name = ent.file_name().to_string_lossy().to_string();
@@ -603,14 +596,13 @@ pub fn plan_transfer(
     dest_base: PathBuf,
     relative_paths: Vec<String>,
 ) -> Result<TransferPlan> {
-    let relative_paths = expand_selection(&source, &source_base, &relative_paths)
-        .unwrap_or(relative_paths);
+    let relative_paths =
+        expand_selection(&source, &source_base, &relative_paths).unwrap_or(relative_paths);
 
-    let (bytes_total, file_count) =
-        match preflight_size(&source, &source_base, &relative_paths) {
-            Ok(v) => (Some(v.0), v.1),
-            Err(_) => (None, relative_paths.len() as u64),
-        };
+    let (bytes_total, file_count) = match preflight_size(&source, &source_base, &relative_paths) {
+        Ok(v) => (Some(v.0), v.1),
+        Err(_) => (None, relative_paths.len() as u64),
+    };
 
     let mode = match (source.is_local, dest.is_local) {
         (true, true) => TransferMode::LocalCopy,
@@ -693,12 +685,22 @@ pub fn run_transfer(
         TransferMode::LocalCopy | TransferMode::LocalToRemote | TransferMode::RemoteToLocal => {
             run_rsync_local_client(plan, &rsync, &files_from, cancel.clone(), &on_progress)
         }
-        TransferMode::RemotePush => {
-            run_remote_orchestrated(plan, &rsync, &files_from, true, cancel.clone(), &on_progress)
-        }
-        TransferMode::RemotePull => {
-            run_remote_orchestrated(plan, &rsync, &files_from, false, cancel.clone(), &on_progress)
-        }
+        TransferMode::RemotePush => run_remote_orchestrated(
+            plan,
+            &rsync,
+            &files_from,
+            true,
+            cancel.clone(),
+            &on_progress,
+        ),
+        TransferMode::RemotePull => run_remote_orchestrated(
+            plan,
+            &rsync,
+            &files_from,
+            false,
+            cancel.clone(),
+            &on_progress,
+        ),
     };
 
     let _ = std::fs::remove_file(&files_from);
@@ -711,6 +713,8 @@ fn write_files_from_list(relatives: &[String]) -> Result<PathBuf> {
     for rel in relatives {
         writeln!(f, "{rel}")?;
     }
+    f.flush()?;
+    f.sync_all()?;
     Ok(path)
 }
 
@@ -744,7 +748,10 @@ fn run_rsync_local_client(
                 plan.source_base.to_string_lossy().trim_end_matches('/')
             )
         }
-        _ => format!("{}/", plan.source_base.to_string_lossy().trim_end_matches('/')),
+        _ => format!(
+            "{}/",
+            plan.source_base.to_string_lossy().trim_end_matches('/')
+        ),
     };
 
     let dst = match plan.mode {
@@ -760,10 +767,16 @@ fn run_rsync_local_client(
         TransferMode::RemoteToLocal => {
             cmd.arg("-e").arg(ssh_rsh_args(&plan.source));
             maybe_rsync_path_for_remote(&mut cmd, &plan.source);
-            format!("{}/", plan.dest_base.to_string_lossy().trim_end_matches('/'))
+            format!(
+                "{}/",
+                plan.dest_base.to_string_lossy().trim_end_matches('/')
+            )
         }
         TransferMode::LocalCopy => {
-            format!("{}/", plan.dest_base.to_string_lossy().trim_end_matches('/'))
+            format!(
+                "{}/",
+                plan.dest_base.to_string_lossy().trim_end_matches('/')
+            )
         }
         _ => unreachable!(),
     };
@@ -822,8 +835,16 @@ fn run_remote_orchestrated(
         }
     }
 
-    let src_base = plan.source_base.to_string_lossy().trim_end_matches('/').to_string();
-    let dst_base = plan.dest_base.to_string_lossy().trim_end_matches('/').to_string();
+    let src_base = plan
+        .source_base
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let dst_base = plan
+        .dest_base
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
     let rsync_remote = "rsync";
     let ssh_e = peer_ssh_command(peer);
 
@@ -914,8 +935,6 @@ fn watch_child(
     let started = Instant::now();
     let mut last_sample = started;
     let mut last_bytes = 0u64;
-    let mut last_progress_at = started;
-    let mut last_percent: Option<f32> = None;
     let mut child_status: Option<ExitStatus> = None;
     let mut streams_done = 0u8;
     // After the process exits, do not wait indefinitely for pipe EOF — a grandchild
@@ -940,10 +959,6 @@ fn watch_child(
                 };
                 if let Some(parsed) = parse_progress2(&line) {
                     bytes_done = parsed.bytes_done;
-                    last_progress_at = Instant::now();
-                    if let Some(p) = parsed.percent {
-                        last_percent = Some(p as f32);
-                    }
                     if let Some(r) = parsed.bytes_per_sec {
                         rate_bps = Some(r);
                     } else {
@@ -961,7 +976,7 @@ fn watch_child(
                             rate_bps = Some(bytes_done as f64 / elapsed);
                         }
                     }
-                    if transfer_data_complete(&parsed, bytes_total, bytes_done) {
+                    if transfer_data_complete(&parsed) {
                         data_complete = true;
                     }
                     let mut prog = make_progress(
@@ -976,17 +991,8 @@ fn watch_child(
                         prog.eta_secs = Some(0);
                     }
                     on_progress(prog);
-
-                    if data_complete {
-                        return Ok(finish_transfer_early(
-                            child,
-                            rx,
-                            bytes_done,
-                            bytes_total,
-                            rate_bps,
-                            on_progress,
-                        ));
-                    }
+                    // Keep waiting for rsync to exit. Progress can hit 100% / to-chk=0
+                    // while the last file is still being written; killing here truncated it.
                 } else if is_err_text && !line.trim().is_empty() {
                     err_buf.push_str(&line);
                     if !line.ends_with('\n') {
@@ -994,27 +1000,7 @@ fn watch_child(
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if !data_complete
-                    && stall_complete(last_progress_at, bytes_total, bytes_done, last_percent)
-                {
-                    on_progress(make_progress(
-                        bytes_done,
-                        bytes_total,
-                        rate_bps,
-                        last_percent,
-                        true,
-                    ));
-                    return Ok(finish_transfer_early(
-                        child,
-                        rx,
-                        bytes_done,
-                        bytes_total,
-                        rate_bps,
-                        on_progress,
-                    ));
-                }
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 streams_done = 2;
             }
@@ -1103,106 +1089,10 @@ fn watch_child(
     })
 }
 
-/// Keep draining pipes and reap the child without blocking the transfer thread.
-fn finish_transfer_early(
-    child: Child,
-    rx: mpsc::Receiver<RsyncChunk>,
-    bytes_done: u64,
-    bytes_total: Option<u64>,
-    rate_bps: Option<f64>,
-    on_progress: &impl Fn(Progress),
-) -> TransferResult {
-    let bytes_done = bytes_total
-        .map(|total| bytes_done.max(total))
-        .unwrap_or(bytes_done);
-    on_progress(Progress {
-        bytes_done,
-        bytes_total,
-        current_file: None,
-        indeterminate: false,
-        message: "Done".into(),
-        bytes_per_sec: rate_bps,
-        eta_secs: Some(0),
-        percent: Some(100.0),
-        data_complete: true,
-    });
-    reap_child_in_background(child, rx);
-    TransferResult {
-        bytes_transferred: bytes_done,
-        cancelled: false,
-        message: "OK".into(),
-    }
-}
-
-fn transfer_data_complete(
-    parsed: &ParsedProgress,
-    bytes_total: Option<u64>,
-    bytes_done: u64,
-) -> bool {
-    if parsed.percent.is_some_and(|p| p >= 100) {
-        return true;
-    }
-    if parsed.to_chk.is_some_and(|(left, _)| left == 0) {
-        return true;
-    }
-    if let Some(total) = bytes_total {
-        if total > 0 && bytes_done >= total {
-            return parsed.percent.is_some_and(|p| p >= 95);
-        }
-    }
-    false
-}
-
-fn stall_complete(
-    last_progress_at: Instant,
-    bytes_total: Option<u64>,
-    bytes_done: u64,
-    last_percent: Option<f32>,
-) -> bool {
-    if last_progress_at.elapsed() < Duration::from_millis(1200) {
-        return false;
-    }
-    if last_percent.is_some_and(|p| p >= 99.0) {
-        return true;
-    }
-    if let Some(total) = bytes_total {
-        if total > 0 && bytes_done as f64 >= total as f64 * 0.95 {
-            return true;
-        }
-    }
-    false
-}
-
-/// Keep draining pipes and wait for the child so SSH teardown cannot stall the UI,
-/// and so a full pipe buffer cannot deadlock the still-running process.
-fn reap_child_in_background(mut child: Child, rx: mpsc::Receiver<RsyncChunk>) {
-    std::thread::spawn(move || {
-        let started = Instant::now();
-        loop {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(_) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if child.try_wait().ok().flatten().is_some() {
-                        break;
-                    }
-                    // Payload is done; don't wait forever for SSH/rsync teardown.
-                    if started.elapsed() > Duration::from_secs(3) {
-                        let _ = child.kill();
-                        break;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        let drain_until = Instant::now() + Duration::from_millis(300);
-        while Instant::now() < drain_until {
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-        let _ = child.wait();
-    });
+fn transfer_data_complete(parsed: &ParsedProgress) -> bool {
+    // `100%` alone is not enough: progress2 can report 100% while ir-chk still
+    // has files left (including the last file in a folder).
+    parsed.to_chk.is_some_and(|(left, _)| left == 0)
 }
 
 fn make_progress(
@@ -1401,10 +1291,8 @@ mod tests {
 
     #[test]
     fn parse_progress() {
-        let p = parse_progress2(
-            "  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=0/1)",
-        )
-        .unwrap();
+        let p =
+            parse_progress2("  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=0/1)").unwrap();
         assert_eq!(p.bytes_done, 1_048_576);
         assert!((p.bytes_per_sec.unwrap() - 10.0 * 1024.0 * 1024.0).abs() < 1.0);
         assert_eq!(p.percent, Some(50));
@@ -1419,12 +1307,17 @@ mod tests {
 
     #[test]
     fn parse_ir_chk() {
-        let p = parse_progress2(
-            "  999 100%  1.00MB/s    0:00:01 (xfr#2, ir-chk=12/40)",
-        )
-        .unwrap();
+        let p = parse_progress2("  999 100%  1.00MB/s    0:00:01 (xfr#2, ir-chk=12/40)").unwrap();
         assert_eq!(p.percent, Some(100));
         assert_eq!(p.to_chk, Some((12, 40)));
+        assert!(!transfer_data_complete(&p));
+    }
+
+    #[test]
+    fn data_complete_when_to_chk_zero() {
+        let p =
+            parse_progress2("  1,048,576  100%  10.00MB/s    0:00:01 (xfr#4, to-chk=0/4)").unwrap();
+        assert!(transfer_data_complete(&p));
     }
 
     #[test]

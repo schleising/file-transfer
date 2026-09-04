@@ -456,12 +456,7 @@ impl AppState {
                     self.preflight_ok = Some(r);
                 }
                 BgMsg::Progress(p) => {
-                    let data_complete = p.data_complete;
-                    let bytes_done = p.bytes_done;
                     self.progress = p;
-                    if data_complete {
-                        self.mark_transfer_complete(bytes_done, false);
-                    }
                 }
                 BgMsg::TransferDone(r) => match r {
                     Ok((bytes, cancelled)) => {
