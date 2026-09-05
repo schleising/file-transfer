@@ -1,6 +1,15 @@
 use std::path::Path;
 use uuid::Uuid;
 
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub const CRATE_VERSIONS: [(&str, &str); 4] = [
+    ("ft-app", APP_VERSION),
+    ("ft-exec", ft_exec::VERSION),
+    ("ft-store", ft_store::VERSION),
+    ("ft-mdns", ft_mdns::VERSION),
+];
+
 pub fn format_bytes(n: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;

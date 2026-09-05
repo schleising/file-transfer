@@ -2,6 +2,7 @@ use crate::icons::{Glyph, Icon};
 use crate::state::{AccessCheck, AppState, BrowseTarget, NavTab, Side};
 use crate::util::{
     folder_display_name, format_bytes, host_color, progress_detail, progress_fraction, status_kind,
+    APP_VERSION, CRATE_VERSIONS,
 };
 use dioxus::prelude::*;
 use std::path::PathBuf;
@@ -101,7 +102,21 @@ fn Sidebar() -> Element {
                 div { class: "brand-mark",
                     Icon { kind: Glyph::Transfer }
                 }
-                h1 { "File Transfer" }
+                div { class: "brand-text",
+                    h1 { "File Transfer" }
+                    div { class: "brand-version",
+                        span { "v{APP_VERSION}" }
+                        div { class: "brand-version-tip",
+                            div { class: "brand-version-tip-title", "Crates" }
+                            for (name, ver) in CRATE_VERSIONS {
+                                div { class: "brand-version-tip-row",
+                                    span { "{name}" }
+                                    span { "{ver}" }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             nav { class: "nav",
                 NavButton {

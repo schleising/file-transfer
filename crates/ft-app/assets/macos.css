@@ -162,6 +162,7 @@ textarea {
   gap: 8px;
   padding: 4px 8px 16px;
   color: var(--label);
+  overflow: visible;
 }
 
 .brand-mark {
@@ -185,6 +186,78 @@ textarea {
   font-size: 13px;
   font-weight: 650;
   letter-spacing: -0.2px;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.brand-version {
+  position: relative;
+  width: fit-content;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--tertiary);
+  letter-spacing: 0.01em;
+  cursor: default;
+}
+
+.brand-version-tip {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  min-width: 148px;
+  padding: 8px 0 6px;
+  background: var(--content);
+  border: 0.5px solid var(--separator);
+  border-radius: 10px;
+  box-shadow: var(--sheet-shadow);
+  z-index: 70;
+  -webkit-app-region: no-drag;
+}
+
+.brand-version-tip::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -8px;
+  height: 8px;
+}
+
+.brand-version:hover .brand-version-tip {
+  display: block;
+}
+
+.brand-version-tip-title {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tertiary);
+  padding: 0 12px 6px;
+}
+
+.brand-version-tip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 510;
+  font-variant-numeric: tabular-nums;
+}
+
+.brand-version-tip-row span:first-child {
+  color: var(--secondary);
+}
+
+.brand-version-tip-row span:last-child {
+  color: var(--label);
 }
 
 .nav {

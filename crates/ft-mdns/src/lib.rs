@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone)]
 pub struct DiscoveredHost {
     pub name: String,

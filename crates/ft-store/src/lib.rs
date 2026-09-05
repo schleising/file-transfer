@@ -6,6 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationKind {
     Source,

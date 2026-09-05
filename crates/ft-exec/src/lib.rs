@@ -9,6 +9,8 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Connection / path identity used by the executor (no DB types).
 #[derive(Debug, Clone)]
 pub struct HostRef {

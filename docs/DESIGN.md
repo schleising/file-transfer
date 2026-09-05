@@ -140,7 +140,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 Sidebar + main stage + persistent footer.
 
-- **Sidebar** — Source / Files / Destination steps; **Summary** of the current plan (source host/folder, selected files with hover list, destination host/folder); **Access status** (Untested / Testing / Accessible / Inaccessible); **Reset** (clears the plan and returns to Source); footer caption “Direct rsync over SSH”.
+- **Sidebar** — brand with app version (hover for crate versions); Source / Files / Destination steps; **Summary** of the current plan (source host/folder, selected files with hover list, destination host/folder); **Access status** (Untested / Testing / Accessible / Inaccessible); **Reset** (clears the plan and returns to Source); footer caption “Direct rsync over SSH”.
 - **Main** — the active step. Source and Destination show **Add Location** in the page header. **Continue** / **Back** sit in the wizard bar.
 - **Footer** — status, rate/ETA, progress bar, **Cancel** while transferring, primary **Transfer** (enabled only when Access status is Accessible).
 
@@ -304,7 +304,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 ## 12. GUI details
 
 - Toolkit: **Dioxus desktop 0.8** (WKWebView) with a macOS System Settings–style layout, SF Pro / `-apple-system` type, system accent, light and dark appearance.
-- Layout: **sidebar wizard** (Source, Files, Destination) under a transparent full-size titlebar; **Summary** + **Access status**; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel, Transfer).
+- Layout: **sidebar wizard** (Source, Files, Destination) under a transparent full-size titlebar; brand shows the app version (hover lists `ft-app` / `ft-exec` / `ft-store` / `ft-mdns`); **Summary** + **Access status**; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel, Transfer).
 - Icons: SF Symbol–style inline SVGs for nav, folders, files, network, status.
 - Locations: Finder-like **tiles** grouped by host; live drag-reorder; Add folder / Add Location.
 - Primary actions: **Continue** / **Reset** / **Transfer** use the system blue accent.
