@@ -4,11 +4,13 @@
 
 ## 1. Overview
 
-A **macOS** desktop application that orchestrates file transfers between computers using **SSH** and **rsync** (Homebrew on macOS). The app installs as **File Transfer.app** under `/Applications`. Linux machines are **source and/or destination only**—they never run this GUI.
+A **macOS** desktop application that orchestrates file transfers between computers using **SSH** and **rsync** (Homebrew on macOS). The app installs as **File Transfer.app** under `/Applications` (bundle id `local.file-transfer`). Linux machines are **source and/or destination only**—they never run this GUI.
 
 File bytes move **directly from source to destination** when both are remote. They do not stream through the controller (avoid the `rsync user@A:… user@B:…` local-relay pitfall).
 
-Hosts are discoverable via **Avahi / Bonjour** (`_ssh._tcp`). Missing SSH keys or peer access **only blocks that transfer**; the app always launches and remains usable.
+Hosts are discoverable via **Avahi / Bonjour** (`_ssh._tcp`) from the Add Location sheet. Missing SSH keys or peer access **only blocks that transfer**; the app always launches and remains usable.
+
+On macOS the process stays running after the window is closed: it hides to a **menu-bar extra**. Quit from the extra or the File Transfer menu. **Open at Login** is a LaunchAgent (`~/Library/LaunchAgents/local.file-transfer.plist`) that starts the app hidden.
 
 ### Roles
 
@@ -38,7 +40,7 @@ Source and/or destination may be the controller Mac itself.
 
 1. Run the GUI on one Mac and transfer files from a second computer to a third.
 2. Persist known computers for quick selection.
-3. Persist known **locations** (host + folder path) for quick selection on the Transfer tab.
+3. Persist known **locations** (host + folder path) as tiles on Source and Destination.
 4. List files in a source location for selection (multi-select; folders as units).
 5. Select a single destination location.
 6. Allow source or destination to be the controller Mac.
@@ -58,6 +60,9 @@ Source and/or destination may be the controller Mac itself.
 - Cloud sync, versioning, or conflict resolution.
 - Blocking app launch on incomplete SSH setup.
 - Apple Developer signing, notarization, or third-party distribution.
+- Transfer **History** UI or persisted job records.
+- Native macOS folder picker (`rfd`).
+- Dedicated Computers / Locations / History tabs (hosts and folders are managed from the transfer wizard).
 
 ---
 
@@ -99,10 +104,11 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 ### Controller
 
-- macOS only; **Dioxus desktop** GUI (WKWebView, macOS-native styling).
-- Install: `./scripts/install-app.sh` → `cargo build --release -p ft-app`, assemble minimal `.app`, copy to `/Applications`.
+- macOS only; **Dioxus desktop 0.8** GUI (WKWebView, macOS-native styling). Stylesheet is `include_str!`’d at compile time (`crates/ft-app/assets/macos.css`); CSS changes require a rebuild.
+- Install: `./scripts/install-app.sh` → `cargo build --release -p ft-app`, assemble minimal `.app` (`Info.plist` sets `NSQuitAlwaysKeepsWindows = false`), copy to `/Applications`.
 - Local rsync: `/opt/homebrew/bin/rsync` then `/usr/local/bin/rsync` (never prefer system `/usr/bin/rsync` when Homebrew exists).
 - Data dir: `~/Library/Application Support/File Transfer/` (SQLite).
+- Window: default **1280×840** logical pixels, minimum **900×560**. Last size and position are restored from the store (`settings.window.frame`). First launch lets macOS place the window. Minimized / fullscreen frames are not saved.
 
 ### Remotes
 
@@ -113,52 +119,60 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 ### Trust and startup
 
-- App always starts.
-- **Check access** / Start gated on SSH and peer reachability; failures show hints, do not crash the app.
+- App always starts. Login-item and session-restore launches stay **hidden** until the extra or Dock/Finder reopen the window.
+- **Transfer** is gated on an automatic access/preflight check (SSH and peer reachability). Failures show as **Access status** in the sidebar; they do not crash the app.
 
 ---
 
 ## 5. Discovery (Avahi / Bonjour)
 
 - Crate `ft-mdns` browses **`_ssh._tcp.local.`** via the `mdns-sd` crate.
-- Computers UI: list discoveries; **Save** into the store.
-- Manual add of SSH destinations remains supported.
+- The **Add Location** sheet lists discoveries as **Discovered on Network**; **Add Host** saves into the store.
+- **Add host manually** (display name, SSH destination, optional port) remains supported.
+- There is no dedicated Computers tab and no in-app “Test SSH” action; reachability is the transfer preflight.
 - No custom DNS-SD service type in v1.
 
 ---
 
 ## 6. User experience (as built)
 
-### Tabs
+### Layout
 
-1. **Transfer** — source/dest location pickers, file multi-select, progress (rate/ETA), Start/Cancel, Check access.
-2. **Computers** — CRUD, Test SSH, Bonjour discoveries.
-3. **Locations** — saved folders per computer.
-4. **History** — job metadata only (no filenames).
+Sidebar + main stage + persistent footer.
 
-### Folder selection
+- **Sidebar** — Source / Files / Destination steps; **Summary** of the current plan (source host/folder, selected files with hover list, destination host/folder); **Access status** (Untested / Testing / Accessible / Inaccessible); **Reset** (clears the plan and returns to Source); footer caption “Direct rsync over SSH”.
+- **Main** — the active step. Source and Destination show **Add Location** in the page header. **Continue** / **Back** sit in the wizard bar.
+- **Footer** — status, rate/ETA, progress bar, **Cancel** while transferring, primary **Transfer** (enabled only when Access status is Accessible).
 
-| Computer | Browse behavior |
-|----------|-----------------|
-| This Mac | Native folder dialog (`rfd`) |
-| Remote | In-app SSH folder browser (list dirs, Up / Home / Go, Select this folder) |
+Selections are locked while preflight is running or a transfer is in progress.
 
-**Locations** are stored as a **computer + folder path** pair. On the Transfer tab, source and destination each have a single quick-select dropdown listing all saved locations as **`Host — Folder (path)`** (not a two-step “pick computer, then pick saved folder”). Selecting an entry sets both the host and folder.
+### Steps
 
-To add or change a path: choose **Browse on** (host picker) → **Browse…** or type a path → **Use path**. New paths are saved as locations and appear in the dropdown. The **Locations** tab still supports explicit CRUD.
+1. **Source** — location tiles grouped by host. Click a folder tile to select it. Drag tiles to reorder within a host (persisted `sort_order`). Tile **×** deletes that saved location. **Add folder** on a host opens the in-app browser. **Add Location** opens the host/path sheet.
+2. **Files** — lists the selected source folder (dotfiles hidden). Multi-select files and/or folders; Select All / Clear / Refresh. Continue requires at least one selection.
+3. **Destination** — same tile UI as Source, for the destination folder.
+
+### Adding a location
+
+**Add Location** sheet: pick a saved host chip, optionally **Add Host** from Bonjour or **Add host manually**, then type an absolute path (**Use Path**) or **Browse…**. The same in-app folder browser is used for **This Mac** and remotes (list dirs, Up / Home / Go, Select this folder). New paths are upserted as locations (`kind` is always `either`).
+
+There is no native `rfd` folder dialog.
 
 ### Transfer flow
 
-1. **Source** — pick a saved location (or browse / type path) → **List**.
-2. Multi-select files and/or folders (dotfiles hidden in listings).
-3. **Destination** — pick a saved location (or browse / type path).
-4. **Check access** → **Start transfer** → progress bar with rate and ETA; **Cancel** kills the local ssh/rsync child.
-5. UI shows **Transfer complete** as soon as rsync reports payload done (see §8); SSH teardown continues in the background.
-6. History records counts/bytes/status only.
+1. **Source** — pick a saved folder (or add one) → **Continue**.
+2. Multi-select files and/or folders → **Continue**.
+3. **Destination** — pick a saved folder (or add one).
+4. When source, files, and destination are all set, preflight runs automatically. **Access status** updates in the sidebar.
+5. **Transfer** → progress bar with rate and ETA; **Cancel** kills the local ssh/rsync child.
+6. UI shows **Transfer complete** as soon as rsync reports payload done (see §8); SSH teardown continues in the background.
+7. **Reset** clears source/files/destination and access state (not saved hosts or folders).
+
+Selected names appear in the running UI (file list and Summary hover). They are session-only.
 
 ### Soft-fail access
 
-Peer host-key or permission failures block the transfer with an explanation (including that the app SSH name must match interactive use). UI otherwise remains usable.
+Peer host-key or permission failures block **Transfer** with an explanation (including that the app SSH name must match interactive use). UI otherwise remains usable.
 
 ---
 
@@ -203,7 +217,7 @@ Relative structure under the destination folder is preserved.
 
 ## 8. Progress (as built)
 
-1. **Preflight** — size/count of the (expanded) selection when possible (`bytes_total`, `file_count` on the job).
+1. **Preflight** — size/count of the (expanded) selection when possible (`bytes_total`, `file_count` on the in-memory plan and Access status).
 2. **Bar** — prefers rsync’s own **percent** from progress2 when available; otherwise `bytes_done / bytes_total`. Shows **transfer rate** and **ETA** when parsed or derivable. Indeterminate animation if total unknown.
 3. **Parsing** — progress2 lines like `bytes  pct  rate  time (xfr#N, to-chk=L/T)`; extract bytes, percent, rate (`KB/s`/`MB/s`/…), and `to-chk` / `ir-chk` for completion detection.
 4. **Stream handling** — drain **both stdout and stderr**; split on `\r` and `\n`. On rsync 3.x with piped I/O, progress2 goes to **stdout** (not stderr). Failing to drain either pipe can **block rsync** (historically stderr; stdout null also caused stalls). Use `--outbuf=N` on the client.
@@ -233,12 +247,15 @@ SQLite at `~/Library/Application Support/File Transfer/file-transfer.sqlite3`.
 
 ### Allowed
 
-- Computers, locations, job metadata (ids, folder location ids, byte counts, file counts, status, short error summary).
+- Computers, locations, and small **settings** (currently the last window frame).
 
 ### Forbidden
 
 - Transferred filenames / selection paths in DB or logs.
+- Persisted job / History records.
 - Persisting `--files-from` contents.
+
+A leftover `jobs` table is dropped on migrate if present.
 
 ### Schema (as built)
 
@@ -250,17 +267,15 @@ Computer {
 
 Location {
   id, computer_id, name, path, kind: Source | Dest | Either,
-  created_at, updated_at
+  sort_order, created_at, updated_at
 }
 
-JobRecord {
-  id, started_at, finished_at?,
-  source_computer_id, source_location_id,
-  dest_computer_id, dest_location_id,
-  bytes_total?, bytes_transferred?, file_count?,
-  status, error_summary?   // no filenames
+Setting {
+  key, value     // e.g. window.frame = "x y width height" (logical px)
 }
 ```
+
+`identity_file` and location `kind` are stored for compatibility; the UI always writes `kind = either` and does not expose an identity-file picker. Hosts can be added from the location sheet; there is no in-app delete-computer control (`This Mac` cannot be deleted in the store).
 
 On first open, a **This Mac** computer and a **Home** location are created automatically.
 
@@ -270,30 +285,31 @@ On first open, a **This Mac** computer and a **Home** location are created autom
 
 ```
 crates/
-  ft-app/     Dioxus UI, background jobs, folder pickers, install target binary
+  ft-app/     Dioxus UI, window frame, macOS extra, transfer threads, folder browser
   ft-exec/    ssh/rsync, listing, expand folders, progress parse, peer probe
-  ft-store/   SQLite computers / locations / jobs
+  ft-store/   SQLite computers / locations / settings
   ft-mdns/    _ssh._tcp browse (mdns-sd)
 scripts/install-app.sh   release build → File Transfer.app → /Applications
 ```
 
 | Crate | Role |
 |-------|------|
-| `ft-app` | Dioxus UI; `rfd` native picker; SSH browse sheet; wires store + exec + mdns |
+| `ft-app` | Dioxus UI; in-app folder browser (local and remote); menu-bar extra / Open at Login; window geometry; wires store + exec + mdns |
 | `ft-exec` | All process orchestration and progress |
 | `ft-store` | Persistence + privacy boundary |
-| `ft-mdns` | Discovery snapshot for the Computers tab |
+| `ft-mdns` | Discovery snapshot for the Add Location sheet |
 
 ---
 
 ## 12. GUI details
 
-- Toolkit: **Dioxus desktop** (WKWebView) with a macOS System Settings–style layout, SF Pro / `-apple-system` type, system accent, light and dark appearance.
-- Layout: **sidebar navigation** (Source, Files, Destination) under a transparent titlebar; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel while transferring).
+- Toolkit: **Dioxus desktop 0.8** (WKWebView) with a macOS System Settings–style layout, SF Pro / `-apple-system` type, system accent, light and dark appearance.
+- Layout: **sidebar wizard** (Source, Files, Destination) under a transparent full-size titlebar; **Summary** + **Access status**; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel, Transfer).
 - Icons: SF Symbol–style inline SVGs for nav, folders, files, network, status.
-- Transfer: Finder-like location tiles and file list; primary **Transfer** action in the footer.
-- Progress footer: capsule progress bar; shows on every step.
-- Packaging: minimal `Info.plist` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
+- Locations: Finder-like **tiles** grouped by host; live drag-reorder; Add folder / Add Location.
+- Primary actions: **Continue** / **Reset** / **Transfer** use the system blue accent.
+- Packaging: minimal `Info.plist` + `AppIcon.icns` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
+- macOS extra: template menu-bar icon; left-click toggles the window; menu has Open at Login and Quit. Close button **hides** the window (`WindowCloseBehaviour::WindowHides`).
 
 ---
 
@@ -309,7 +325,6 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 ## 14. Error handling
 
-
 | Failure | App launch | Transfer |
 |---------|------------|----------|
 | SSH / keys / host key | OK | Block or fail job; peer errors explain exact SSH name |
@@ -321,6 +336,8 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Long pause at 100% waiting for SSH teardown | — | UI can show 100% on `to-chk=0`; rsync is allowed to exit before success |
 | Missing Homebrew rsync on controller | OK | Local rsync ops fail with install hint |
 | Cancel | OK | Kill child; status cancelled |
+| Close window | Stays in menu bar | — |
+| Open at Login | Starts hidden | — |
 
 ---
 
@@ -328,16 +345,20 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 | Area | Status |
 |------|--------|
-| Workspace crates + Dioxus app | Done |
+| Workspace crates + Dioxus 0.8 app | Done |
 | Store + This Mac / Home defaults | Done |
 | Local ↔ remote ↔ remote→remote (push/pull) | Done |
-| Bonjour `_ssh._tcp` + save | Done |
-| Native + SSH folder browse | Done |
+| Bonjour `_ssh._tcp` + save from Add Location | Done |
+| In-app folder browse (local and remote) | Done |
+| Location tiles, drag reorder, delete | Done |
+| Automatic access/preflight; Transfer gated on Accessible | Done |
 | Progress2 parse + dual-stream drain + `--inplace` + `--outbuf=N` | Done |
 | Progress rate/ETA; wait for rsync exit (do not kill on 100%) | Done |
-| Transfer tab: combined host/folder location quick-select | Done |
 | Folder expand for `--files-from` | Done |
+| Menu-bar extra, hide-on-close, Open at Login | Done |
+| Window size/position restore | Done |
 | Install script → `/Applications` | Done |
+| History / job records | Not in v1 |
 | Overwrite policy UI / df preflight / redacted command panel | Not in v1 |
 | Signing / notarization | Out of scope |
 
@@ -349,8 +370,10 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 - “Transfer complete” appears when payload finishes, not after SSH teardown.
 - Remote Mac and Linux listing (bash + Python).
 - Peer SSH with matching hostnames / `accept-new`.
-- Privacy: DB has no per-file names after jobs.
+- Privacy: DB has no per-file names (no job table).
 - Install from `scripts/install-app.sh` and launch from `/Applications`.
+- Close hides to the extra; Quit from the extra or app menu; Open at Login starts hidden.
+- Window reopen restores last size and position.
 
 ---
 
@@ -358,14 +381,18 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 | Topic | Decision / as-built |
 |-------|---------------------|
-| GUI | **Dioxus desktop** (macOS-styled WKWebView) |
+| GUI | **Dioxus desktop 0.8** (macOS-styled WKWebView) |
+| Navigation | **Source → Files → Destination** wizard; no Computers / Locations / History tabs |
+| Locations | **Tiles per host**; drag to reorder; Add Location sheet for hosts + paths |
+| Folder pick | **In-app browser** for both This Mac and remotes (not `rfd`) |
+| Access | **Automatic preflight**; Transfer enabled only when Accessible |
+| Window | Default **1280×840**; persist logical size + position in `settings` |
+| Close / login | **Hide to menu-bar extra**; Open at Login via LaunchAgent `--hidden` |
 | Remote→remote | Probe both; **prefer push** |
 | Progress | Preflight total + parse **progress2 from stdout** (`\r`); `--outbuf=N`; drain both pipes; rate/ETA; **wait for rsync exit** |
-| Locations (Transfer tab) | **Single dropdown per side**: `Host — Folder (path)`; browse/path adds saved locations |
 | DNS-SD | **`_ssh._tcp` only** |
-| App name / run mode | **File Transfer.app** in `/Applications` |
+| App name / run mode | **File Transfer.app** in `/Applications` (`local.file-transfer`) |
 | Distribution | Personal build; `scripts/install-app.sh` (no cargo-bundle, no notarization) |
-| Folder pick | **rfd** local; **SSH browser** remote |
 | Rsync write mode | **`--inplace`** |
 | Folder select | **Expand to file list** before `--files-from` |
 | Remote list | **Python preferred**; bash wrapper; hide `.*` in UI listings |
@@ -380,6 +407,6 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 - A≠B≠C jobs move payload B↔C via rsync over SSH (push preferred).
 - Progress bar updates during multi-file jobs without stalling rsync; shows rate and ETA.
 - “Transfer complete” when rsync payload is done, not when SSH finishes closing.
-- Host/folder locations persist as combined entries; filenames never stored.
+- Host/folder locations persist as tiles; filenames never stored.
 - Broken SSH setup does not prevent startup.
 - Controller uses Homebrew rsync, not `/usr/bin/rsync`.
