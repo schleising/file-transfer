@@ -20,6 +20,7 @@ mkdir -p "$MACOS" "$RES"
 cp "$BIN" "$MACOS/file-transfer"
 chmod +x "$MACOS/file-transfer"
 
+"$ROOT/scripts/make-app-icon.sh"
 ICON="$ROOT/crates/ft-app/assets/AppIcon.icns"
 if [[ ! -f "$ICON" ]]; then
   echo "Missing app icon: $ICON" >&2
