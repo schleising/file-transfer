@@ -21,10 +21,17 @@ pub enum BgMsg {
     },
     Preflight {
         gen: u64,
-        result: Result<String, String>,
+        result: Result<PreflightOk, String>,
     },
     Progress(Progress),
     TransferDone(Result<(u64, bool), String>),
+}
+
+#[derive(Clone)]
+pub struct PreflightOk {
+    pub message: String,
+    pub file_count: u64,
+    pub bytes_total: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,8 +50,18 @@ pub enum Side {
 pub enum AccessCheck {
     Untested,
     Testing,
-    Accessible(String),
+    Accessible {
+        message: String,
+        file_count: u64,
+        bytes_total: Option<u64>,
+    },
     Inaccessible(String),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct CopyItem {
+    pub name: String,
+    pub is_dir: bool,
 }
 
 impl AccessCheck {
@@ -52,7 +69,7 @@ impl AccessCheck {
         match self {
             Self::Untested => "idle",
             Self::Testing => "testing",
-            Self::Accessible(_) => "ok",
+            Self::Accessible { .. } => "ok",
             Self::Inaccessible(_) => "err",
         }
     }
@@ -61,7 +78,7 @@ impl AccessCheck {
         match self {
             Self::Untested => "Untested",
             Self::Testing => "Testing",
-            Self::Accessible(_) => "Accessible",
+            Self::Accessible { .. } => "Accessible",
             Self::Inaccessible(_) => "Inaccessible",
         }
     }
@@ -69,7 +86,8 @@ impl AccessCheck {
     pub fn detail(&self) -> &str {
         match self {
             Self::Untested | Self::Testing => self.label(),
-            Self::Accessible(msg) | Self::Inaccessible(msg) => msg,
+            Self::Accessible { message, .. } => message,
+            Self::Inaccessible(msg) => msg,
         }
     }
 }
@@ -253,38 +271,85 @@ impl AppState {
             .collect()
     }
 
-    pub fn dest_folder_label(&self) -> Option<String> {
-        let loc = self.dest_location.and_then(|id| self.location(id))?;
-        let host = self
-            .computer(loc.computer_id)
-            .map(|c| c.name.as_str())
-            .unwrap_or("?");
-        let folder = folder_display_name(&loc.path, &loc.name);
-        Some(format!("{host} — {folder}"))
-    }
-
-    pub fn compact_location_label(&self, side: Side) -> String {
+    fn side_location(&self, side: Side) -> Option<&Location> {
         let id = match side {
             Side::Source => self.source_location,
             Side::Dest => self.dest_location,
-        };
-        let Some(loc) = id.and_then(|id| self.location(id)) else {
-            return "—".into();
-        };
-        let host = self
-            .computer(loc.computer_id)
-            .map(|c| c.name.as_str())
-            .unwrap_or("?");
-        let folder = folder_display_name(&loc.path, &loc.name);
-        format!("{host} · {folder}")
+        }?;
+        self.location(id)
     }
 
-    pub fn compact_location_title(&self, side: Side) -> String {
-        match side {
-            Side::Source => self.source_folder_label(),
-            Side::Dest => self.dest_folder_label(),
+    pub fn side_host_name(&self, side: Side) -> String {
+        self.side_location(side)
+            .and_then(|loc| self.computer(loc.computer_id))
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "—".into())
+    }
+
+    pub fn side_folder_name(&self, side: Side) -> String {
+        self.side_location(side)
+            .map(|loc| folder_display_name(&loc.path, &loc.name))
+            .unwrap_or_else(|| "—".into())
+    }
+
+    pub fn side_folder_title(&self, side: Side) -> String {
+        self.side_location(side)
+            .map(|loc| loc.path.display().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn copy_items(&self) -> Vec<CopyItem> {
+        let mut items: Vec<CopyItem> = self
+            .selected
+            .iter()
+            .map(|name| {
+                let is_dir = self
+                    .entries
+                    .iter()
+                    .find(|e| e.name == *name)
+                    .map(|e| e.is_dir)
+                    .unwrap_or(false);
+                CopyItem {
+                    name: name.clone(),
+                    is_dir,
+                }
+            })
+            .collect();
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+        items
+    }
+
+    pub fn copy_stats_label(&self) -> String {
+        if matches!(self.access, AccessCheck::Testing) {
+            return "Calculating…".into();
         }
-        .unwrap_or_default()
+        let (file_count, bytes_total) = match &self.access {
+            AccessCheck::Accessible {
+                file_count,
+                bytes_total,
+                ..
+            } => (*file_count, *bytes_total),
+            _ => {
+                let mut file_count = 0u64;
+                let mut bytes = 0u64;
+                for e in &self.entries {
+                    if self.selected.contains(&e.name) && !e.is_dir {
+                        file_count += 1;
+                        bytes += e.size;
+                    }
+                }
+                (file_count, Some(bytes))
+            }
+        };
+        let files = if file_count == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{file_count} files")
+        };
+        match bytes_total {
+            Some(n) => format!("{files} · {}", format_bytes(n)),
+            None => files,
+        }
     }
 
     pub fn source_folder_label(&self) -> Option<String> {
@@ -501,7 +566,11 @@ impl AppState {
                         continue;
                     }
                     self.access = match result {
-                        Ok(msg) => AccessCheck::Accessible(msg),
+                        Ok(ok) => AccessCheck::Accessible {
+                            message: ok.message,
+                            file_count: ok.file_count,
+                            bytes_total: ok.bytes_total,
+                        },
                         Err(msg) => AccessCheck::Inaccessible(msg),
                     };
                 }
@@ -568,7 +637,7 @@ impl AppState {
     }
 
     pub fn transfer_ready(&self) -> bool {
-        matches!(self.access, AccessCheck::Accessible(_)) && !self.transferring
+        matches!(self.access, AccessCheck::Accessible { .. }) && !self.transferring
     }
 
     pub fn selections_locked(&self) -> bool {
@@ -691,7 +760,11 @@ impl AppState {
                 )
                 .map_err(|e| format!("{e:#}"))?;
                 ft_exec::preflight_start(&plan).map_err(|e| format!("{e:#}"))?;
-                Ok(format!("OK — mode {:?}", plan.mode))
+                Ok(PreflightOk {
+                    message: format!("OK — mode {:?}", plan.mode),
+                    file_count: plan.file_count,
+                    bytes_total: plan.bytes_total,
+                })
             })();
             let _ = tx.send(BgMsg::Preflight { gen, result });
         });
@@ -735,7 +808,7 @@ impl AppState {
     }
 
     pub fn start_transfer(&mut self) {
-        if !matches!(self.access, AccessCheck::Accessible(_)) || self.transferring {
+        if !matches!(self.access, AccessCheck::Accessible { .. }) || self.transferring {
             return;
         }
         let plan = match self.build_plan() {

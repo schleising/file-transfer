@@ -71,10 +71,22 @@ fn Sidebar() -> Element {
     let mut state = use_context::<Signal<AppState>>();
     let tab = state.read().tab;
     let transferring = state.read().transferring;
-    let source_label = state.read().compact_location_label(Side::Source);
-    let dest_label = state.read().compact_location_label(Side::Dest);
-    let source_title = state.read().compact_location_title(Side::Source);
-    let dest_title = state.read().compact_location_title(Side::Dest);
+    let source_host = state.read().side_host_name(Side::Source);
+    let source_folder = state.read().side_folder_name(Side::Source);
+    let source_folder_title = state.read().side_folder_title(Side::Source);
+    let dest_host = state.read().side_host_name(Side::Dest);
+    let dest_folder = state.read().side_folder_name(Side::Dest);
+    let dest_folder_title = state.read().side_folder_title(Side::Dest);
+    let copy_items = state.read().copy_items();
+    let copy_n = copy_items.len();
+    let copy_label = if copy_n == 0 {
+        "—".to_string()
+    } else if copy_n == 1 {
+        "1 item".to_string()
+    } else {
+        format!("{copy_n} items")
+    };
+    let copy_stats = state.read().copy_stats_label();
     let access = state.read().access.clone();
     let status_kind = access.kind();
     let status_label = access.label();
@@ -114,12 +126,59 @@ fn Sidebar() -> Element {
             div { class: "sidebar-panel",
                 div { class: "sidebar-panel-title", "Access" }
                 div { class: "access-row",
-                    span { class: "access-k", "Source" }
-                    span { class: "access-v", title: "{source_title}", "{source_label}" }
+                    span { class: "access-k", "Source Host" }
+                    span { class: "access-v", title: "{source_host}", "{source_host}" }
                 }
                 div { class: "access-row",
-                    span { class: "access-k", "Destination" }
-                    span { class: "access-v", title: "{dest_title}", "{dest_label}" }
+                    span { class: "access-k", "Source Folder" }
+                    span { class: "access-v", title: "{source_folder_title}", "{source_folder}" }
+                }
+                div { class: "access-copy",
+                    div { class: "access-row access-copy-trigger",
+                        span { class: "access-k", "Files" }
+                        span { class: "access-v access-copy-value",
+                            Icon { kind: Glyph::Document }
+                            span { "{copy_label}" }
+                        }
+                    }
+                    div { class: "access-copy-popup",
+                        div { class: "access-copy-popup-title", "Files to copy" }
+                        if copy_n == 0 {
+                            div { class: "access-copy-popup-empty", "No files selected" }
+                        } else {
+                            div { class: "access-copy-popup-list",
+                                for item in copy_items {
+                                    {
+                                        let label = if item.is_dir {
+                                            format!("{}/", item.name)
+                                        } else {
+                                            item.name.clone()
+                                        };
+                                        let glyph = if item.is_dir {
+                                            Glyph::Folder
+                                        } else {
+                                            Glyph::Document
+                                        };
+                                        rsx! {
+                                            div { class: "access-copy-popup-row",
+                                                Icon { kind: glyph }
+                                                span { title: "{label}", "{label}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "access-copy-popup-foot", "{copy_stats}" }
+                        }
+                    }
+                }
+                div { class: "access-row",
+                    span { class: "access-k", "Destination Host" }
+                    span { class: "access-v", title: "{dest_host}", "{dest_host}" }
+                }
+                div { class: "access-row",
+                    span { class: "access-k", "Destination Folder" }
+                    span { class: "access-v", title: "{dest_folder_title}", "{dest_folder}" }
                 }
                 div { class: "access-status-block", title: "{status_detail}",
                     div { class: "access-status-caption", "Access status" }
@@ -129,7 +188,7 @@ fn Sidebar() -> Element {
                                 Icon { kind: Glyph::Help }
                             } else if matches!(access, AccessCheck::Testing) {
                                 span { class: "spinner" }
-                            } else if matches!(access, AccessCheck::Accessible(_)) {
+                            } else if matches!(access, AccessCheck::Accessible { .. }) {
                                 Icon { kind: Glyph::Check }
                             } else {
                                 Icon { kind: Glyph::Close }
