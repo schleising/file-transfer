@@ -10,7 +10,7 @@ brew install rsync
 ./scripts/install-app.sh
 ```
 
-This builds **File Transfer.app** and copies it to `/Applications`, then opens it.
+This builds **File Transfer.app** and copies it to `/Applications`.
 
 Data is stored under `~/Library/Application Support/File Transfer/`.
 
