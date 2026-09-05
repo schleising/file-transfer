@@ -12,6 +12,8 @@ pub enum Glyph {
     Network,
     Home,
     Refresh,
+    Plus,
+    Circle,
 }
 
 #[component]
@@ -73,6 +75,12 @@ fn paths(kind: Glyph) -> Element {
         Glyph::Refresh => rsx! {
             path { d: "M19 12a7 7 0 1 1-2-4.9" }
             path { d: "M19 5v5h-5" }
+        },
+        Glyph::Plus => rsx! {
+            path { d: "M12 5v14M5 12h14" }
+        },
+        Glyph::Circle => rsx! {
+            circle { cx: "12", cy: "12", r: "7" }
         },
     }
 }

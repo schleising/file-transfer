@@ -94,15 +94,24 @@ input {
   font-family: inherit;
 }
 
-input,
+input[type="text"],
+input[type="search"],
+input[type="password"],
 textarea {
   user-select: text;
   cursor: text;
 }
 
+.file-row,
+.file-row * {
+  cursor: default !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .app {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 248px 1fr;
   grid-template-rows: 1fr auto;
   height: 100%;
 }
@@ -125,6 +134,8 @@ textarea {
 .brand,
 .nav,
 .nav-item,
+.sidebar-panel,
+.sidebar-reset,
 .sidebar-foot {
   -webkit-app-region: no-drag;
 }
@@ -203,10 +214,92 @@ textarea {
 }
 
 .sidebar-foot {
-  margin-top: auto;
-  padding: 8px;
+  padding: 8px 2px 0;
   color: var(--tertiary);
   font-size: 11px;
+}
+
+.sidebar-spacer {
+  flex: 1;
+  min-height: 12px;
+}
+
+.sidebar-panel {
+  margin-top: 18px;
+  padding: 10px 8px 8px;
+  border-top: 0.5px solid var(--separator);
+  min-height: 148px;
+}
+
+.sidebar-panel-title {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tertiary);
+  margin-bottom: 8px;
+}
+
+.access-row {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 6px;
+  align-items: baseline;
+  min-height: 18px;
+  margin-bottom: 4px;
+}
+
+.access-k {
+  color: var(--tertiary);
+  font-size: 11px;
+}
+
+.access-v {
+  color: var(--label);
+  font-size: 12px;
+  font-weight: 510;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  min-height: 28px;
+}
+
+.access-actions .btn {
+  flex: 1;
+}
+
+.access-status {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: var(--tertiary);
+}
+
+.access-status.ok {
+  color: var(--ok);
+}
+
+.access-status.err {
+  color: var(--err);
+}
+
+.access-status svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sidebar-reset {
+  width: 100%;
+  margin-bottom: 8px;
 }
 
 .main {
@@ -319,6 +412,13 @@ textarea {
   box-shadow: var(--shadow);
 }
 
+button.tile {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
+}
+
 .tile:hover {
   border-color: color-mix(in srgb, var(--host) 55%, var(--tile-border));
 }
@@ -340,6 +440,28 @@ textarea {
 .tile-icon {
   width: 40px;
   height: 40px;
+  color: var(--host);
+}
+
+.tile-add {
+  appearance: none;
+  font: inherit;
+  border-style: dashed;
+  background: transparent;
+  box-shadow: none;
+  color: var(--secondary);
+}
+
+.tile-add .tile-icon {
+  color: var(--secondary);
+}
+
+.tile-add:hover {
+  border-color: color-mix(in srgb, var(--host) 55%, var(--tile-border));
+  color: var(--host);
+}
+
+.tile-add:hover .tile-icon {
   color: var(--host);
 }
 
@@ -473,7 +595,6 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  user-select: text;
 }
 
 .file-size {
@@ -610,10 +731,30 @@ input[type="text"]:focus {
 }
 
 input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
   accent-color: var(--accent);
   width: 14px;
   height: 14px;
   margin: 0;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--label) 28%, transparent);
+  border-radius: 3.5px;
+  background: var(--field);
+  box-shadow: 0 0.5px 0.5px rgba(0, 0, 0, 0.06) inset;
+  cursor: default !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input[type="checkbox"]:checked {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M3 7.2l2.6 2.6L11 4.2'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 10px 10px;
 }
 
 .path-row {

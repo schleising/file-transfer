@@ -54,6 +54,18 @@ pub fn app() -> Element {
 fn Sidebar() -> Element {
     let mut state = use_context::<Signal<AppState>>();
     let tab = state.read().tab;
+    let transferring = state.read().transferring;
+    let can_check = state.read().check_access_ready();
+    let source_label = state.read().compact_location_label(Side::Source);
+    let dest_label = state.read().compact_location_label(Side::Dest);
+    let source_title = state.read().compact_location_title(Side::Source);
+    let dest_title = state.read().compact_location_title(Side::Dest);
+    let preflight = state.read().preflight_ok.clone();
+    let (status_kind, status_title) = match &preflight {
+        None => ("idle", "Untested".to_string()),
+        Some(Ok(msg)) => ("ok", format!("Success — {msg}")),
+        Some(Err(msg)) => ("err", format!("Fail — {msg}")),
+    };
     rsx! {
         aside { class: "sidebar",
             div { class: "sidebar-traffic" }
@@ -85,6 +97,41 @@ fn Sidebar() -> Element {
                     label: "Destination",
                     onclick: move |_| state.write().set_tab(NavTab::Destination),
                 }
+            }
+            div { class: "sidebar-panel",
+                div { class: "sidebar-panel-title", "Access" }
+                div { class: "access-row",
+                    span { class: "access-k", "Source" }
+                    span { class: "access-v", title: "{source_title}", "{source_label}" }
+                }
+                div { class: "access-row",
+                    span { class: "access-k", "Destination" }
+                    span { class: "access-v", title: "{dest_title}", "{dest_label}" }
+                }
+                div { class: "access-actions",
+                    span { class: "access-status {status_kind}", title: "{status_title}",
+                        if status_kind == "ok" {
+                            Icon { kind: Glyph::Check }
+                        } else if status_kind == "err" {
+                            Icon { kind: Glyph::Close }
+                        } else {
+                            Icon { kind: Glyph::Circle }
+                        }
+                    }
+                    button {
+                        class: "btn",
+                        disabled: !can_check,
+                        onclick: move |_| state.write().run_preflight(),
+                        "Check Access"
+                    }
+                }
+            }
+            div { class: "sidebar-spacer" }
+            button {
+                class: "btn sidebar-reset",
+                disabled: transferring,
+                onclick: move |_| state.write().reset_transfer(),
+                "Reset"
             }
             div { class: "sidebar-foot", "Direct rsync over SSH" }
         }
@@ -166,30 +213,7 @@ fn SourceStep() -> Element {
 
 #[component]
 fn DestinationStep() -> Element {
-    let mut state = use_context::<Signal<AppState>>();
-    let preflight = state.read().preflight_ok.clone();
-    rsx! {
-        LocationTiles { side: Side::Dest }
-        div { style: "margin-top: 8px;",
-            button { class: "btn", onclick: move |_| state.write().run_preflight(), "Check Access" }
-            if let Some(result) = preflight {
-                match result {
-                    Ok(msg) => rsx! {
-                        div { class: "msg ok",
-                            Icon { kind: Glyph::Check }
-                            span { "{msg}" }
-                        }
-                    },
-                    Err(err) => rsx! {
-                        div { class: "msg err",
-                            Icon { kind: Glyph::Close }
-                            span { "{err}" }
-                        }
-                    },
-                }
-            }
-        }
-    }
+    rsx! { LocationTiles { side: Side::Dest } }
 }
 
 #[component]
@@ -386,6 +410,15 @@ fn LocationTiles(side: Side) -> Element {
                                         }
                                     }
                                 }
+                            }
+                            button {
+                                class: "tile tile-add",
+                                r#type: "button",
+                                onclick: move |_| state.write().browse_on_host(computer_id, side),
+                                div { class: "tile-icon",
+                                    Icon { kind: Glyph::Plus }
+                                }
+                                div { class: "tile-name", "Add folder" }
                             }
                             {
                                 let tail_class = if tail_over() == Some(computer_id) {

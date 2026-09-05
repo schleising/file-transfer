@@ -15,7 +15,6 @@ ft-exec.workspace = true
 ft-mdns.workspace = true
 ft-store.workspace = true
 futures-timer.workspace = true
-rfd.workspace = true
 uuid.workspace = true
 
 [package.metadata.bundle]

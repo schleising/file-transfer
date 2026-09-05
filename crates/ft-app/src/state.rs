@@ -206,15 +206,45 @@ impl AppState {
         }
         self.computers
             .iter()
-            .filter_map(|c| {
+            .map(|c| {
                 let locs = by_host.get(&c.id).cloned().unwrap_or_default();
-                if locs.is_empty() {
-                    None
-                } else {
-                    Some((c.clone(), locs))
-                }
+                (c.clone(), locs)
             })
             .collect()
+    }
+
+    pub fn dest_folder_label(&self) -> Option<String> {
+        let loc = self.dest_location.and_then(|id| self.location(id))?;
+        let host = self
+            .computer(loc.computer_id)
+            .map(|c| c.name.as_str())
+            .unwrap_or("?");
+        let folder = folder_display_name(&loc.path, &loc.name);
+        Some(format!("{host} — {folder}"))
+    }
+
+    pub fn compact_location_label(&self, side: Side) -> String {
+        let id = match side {
+            Side::Source => self.source_location,
+            Side::Dest => self.dest_location,
+        };
+        let Some(loc) = id.and_then(|id| self.location(id)) else {
+            return "—".into();
+        };
+        let host = self
+            .computer(loc.computer_id)
+            .map(|c| c.name.as_str())
+            .unwrap_or("?");
+        let folder = folder_display_name(&loc.path, &loc.name);
+        format!("{host} · {folder}")
+    }
+
+    pub fn compact_location_title(&self, side: Side) -> String {
+        match side {
+            Side::Source => self.source_folder_label(),
+            Side::Dest => self.dest_folder_label(),
+        }
+        .unwrap_or_default()
     }
 
     pub fn source_folder_label(&self) -> Option<String> {
@@ -265,45 +295,16 @@ impl AppState {
         id
     }
 
-    fn pick_native_folder(&self, title: &str) -> Option<PathBuf> {
-        let mut dialog = rfd::FileDialog::new().set_title(title);
-        if let Some(home) = dirs::home_dir() {
-            dialog = dialog.set_directory(home);
-        }
-        dialog.pick_folder()
-    }
-
     pub fn open_folder_browse(&mut self, computer_id: Uuid, target: BrowseTarget) {
-        let Some(c) = self.computer(computer_id).cloned() else {
-            return;
-        };
-        if c.is_local {
-            let title = match target {
-                BrowseTarget::Source => "Choose source folder",
-                BrowseTarget::Dest => "Choose destination folder",
-            };
-            if let Some(path) = self.pick_native_folder(title) {
-                self.apply_browsed_folder(computer_id, target, path);
-            }
+        if self.computer(computer_id).is_none() {
             return;
         }
 
         let current = self
-            .location_picker
-            .as_ref()
-            .map(|p| p.path_edit.trim())
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| match target {
-                BrowseTarget::Source => self
-                    .source_location
-                    .and_then(|id| self.location(id))
-                    .map(|l| l.path.clone()),
-                BrowseTarget::Dest => self
-                    .dest_location
-                    .and_then(|id| self.location(id))
-                    .map(|l| l.path.clone()),
-            })
+            .locations
+            .iter()
+            .find(|l| l.computer_id == computer_id)
+            .map(|l| l.path.clone())
             .unwrap_or_else(|| PathBuf::from("~"));
 
         self.folder_browser = Some(FolderBrowser {
@@ -517,6 +518,49 @@ impl AppState {
             && !self.transferring
     }
 
+    pub fn check_access_ready(&self) -> bool {
+        self.transfer_ready()
+    }
+
+    pub fn browse_on_host(&mut self, computer_id: Uuid, side: Side) {
+        let target = match side {
+            Side::Source => BrowseTarget::Source,
+            Side::Dest => BrowseTarget::Dest,
+        };
+        self.open_folder_browse(computer_id, target);
+    }
+
+    fn invalidate_preflight(&mut self) {
+        self.preflight_ok = None;
+    }
+
+    pub fn reset_transfer(&mut self) {
+        if self.transferring {
+            return;
+        }
+        self.apply_location_selection(None, Side::Source);
+        self.apply_location_selection(None, Side::Dest);
+        if let Some(local) = self.computers.iter().find(|c| c.is_local) {
+            self.source_computer = Some(local.id);
+            self.dest_computer = Some(local.id);
+        } else {
+            self.source_computer = None;
+            self.dest_computer = None;
+        }
+        self.entries.clear();
+        self.selected.clear();
+        self.list_error = None;
+        self.listing = false;
+        self.list_loaded_for = None;
+        self.preflight_ok = None;
+        self.progress = Progress::default();
+        self.status_line.clear();
+        self.cancel.store(false, Ordering::SeqCst);
+        self.folder_browser = None;
+        self.location_picker = None;
+        self.tab = NavTab::Source;
+    }
+
     pub fn ensure_files_listed(&mut self) {
         let Some(lid) = self.source_location else {
             return;
@@ -665,10 +709,12 @@ impl AppState {
         for e in &self.entries {
             self.selected.insert(e.name.clone());
         }
+        self.invalidate_preflight();
     }
 
     pub fn clear_file_selection(&mut self) {
         self.selected.clear();
+        self.invalidate_preflight();
     }
 
     pub fn toggle_file(&mut self, name: &str) {
@@ -677,6 +723,7 @@ impl AppState {
         } else {
             self.selected.insert(name.to_string());
         }
+        self.invalidate_preflight();
     }
 
     pub fn delete_location_tile(&mut self, id: Uuid) {
@@ -848,12 +895,14 @@ impl AppState {
                 if let Some(cid) = computer_id {
                     self.source_computer = Some(cid);
                 }
+                self.invalidate_preflight();
             }
             Side::Dest => {
                 self.dest_location = location_id;
                 if let Some(cid) = computer_id {
                     self.dest_computer = Some(cid);
                 }
+                self.invalidate_preflight();
             }
         }
     }
