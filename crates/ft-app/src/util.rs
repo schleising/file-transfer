@@ -78,21 +78,38 @@ pub fn progress_fraction(progress: &ft_exec::Progress, transferring: bool) -> f3
     }
 }
 
-pub fn progress_detail(progress: &ft_exec::Progress, transferring: bool) -> String {
+    pub fn progress_detail(progress: &ft_exec::Progress, transferring: bool) -> String {
     let frac = progress_fraction(progress, transferring);
-    let mut rate_eta = Vec::new();
+    let mut extras = Vec::new();
+    match progress.files_total {
+        Some(total) if total > 0 => extras.push(format!(
+            "{} of {total} {}",
+            progress.files_done.min(total),
+            if total == 1 { "file" } else { "files" }
+        )),
+        _ if transferring && progress.files_done > 0 => extras.push(format!(
+            "{} {}",
+            progress.files_done,
+            if progress.files_done == 1 {
+                "file"
+            } else {
+                "files"
+            }
+        )),
+        _ => {}
+    }
     if let Some(rate) = progress.bytes_per_sec.filter(|r| *r > 0.0) {
-        rate_eta.push(format_rate(rate));
+        extras.push(format_rate(rate));
     }
     if let Some(eta) = progress.eta_secs {
         if transferring && (eta != 0 || transferring) {
-            rate_eta.push(format!("ETA {}", format_eta(eta)));
+            extras.push(format!("ETA {}", format_eta(eta)));
         }
     }
-    let suffix = if rate_eta.is_empty() {
+    let suffix = if extras.is_empty() {
         String::new()
     } else {
-        format!(" · {}", rate_eta.join(" · "))
+        format!(" · {}", extras.join(" · "))
     };
 
     if frac < 0.0 {

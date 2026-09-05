@@ -41,6 +41,10 @@ pub struct Progress {
     pub percent: Option<f32>,
     /// True once rsync reports `to-chk=0` (UI may show complete; process still runs to exit).
     pub data_complete: bool,
+    /// Files transferred so far (`xfr#` from progress2).
+    pub files_done: u64,
+    /// Total files in the transfer, when known.
+    pub files_total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -725,7 +729,9 @@ fn rsync_common_args(cmd: &mut Command) {
         .arg("--info=progress2")
         // Not a TTY when piped: without this, progress/stderr can be block-buffered and
         // flush only when the process exits (looks like a long hang at ~100%).
-        .arg("--outbuf=N");
+        .arg("--outbuf=N")
+        // Itemize codes so we can count files only (`f`), ignoring directories (`d`).
+        .arg("--out-format=%i");
 }
 
 fn run_rsync_local_client(
@@ -788,7 +794,13 @@ fn run_rsync_local_client(
         .stderr(Stdio::piped());
 
     let child = cmd.spawn().context("spawn rsync")?;
-    watch_child(child, plan.bytes_total, cancel, on_progress)
+    watch_child(
+        child,
+        plan.bytes_total,
+        plan.file_count,
+        cancel,
+        on_progress,
+    )
 }
 
 fn ssh_rsh_args(host: &HostRef) -> String {
@@ -857,10 +869,10 @@ fn run_remote_orchestrated(
         body = if push {
             format!(
                 "if command -v stdbuf >/dev/null 2>&1; then \
-                   stdbuf -oL \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --files-from={list} -e {ssh_e} \
+                   stdbuf -oL \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --out-format=%i --files-from={list} -e {ssh_e} \
                    --rsync-path={rpath} {src}/ {peer}:{dst}/; \
                  else \
-                   \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --files-from={list} -e {ssh_e} \
+                   \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --out-format=%i --files-from={list} -e {ssh_e} \
                    --rsync-path={rpath} {src}/ {peer}:{dst}/; \
                  fi; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
@@ -873,10 +885,10 @@ fn run_remote_orchestrated(
         } else {
             format!(
                 "if command -v stdbuf >/dev/null 2>&1; then \
-                   stdbuf -oL \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --files-from={list} -e {ssh_e} \
+                   stdbuf -oL \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --out-format=%i --files-from={list} -e {ssh_e} \
                    --rsync-path={rpath} {peer}:{src}/ {dst}/; \
                  else \
-                   \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --files-from={list} -e {ssh_e} \
+                   \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --out-format=%i --files-from={list} -e {ssh_e} \
                    --rsync-path={rpath} {peer}:{src}/ {dst}/; \
                  fi; ec=$?; rm -f {list}; exit $ec",
                 list = shell_quote(&remote_list),
@@ -896,12 +908,19 @@ fn run_remote_orchestrated(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let child = cmd.spawn().context("spawn remote rsync via ssh")?;
-    watch_child(child, plan.bytes_total, cancel, on_progress)
+    watch_child(
+        child,
+        plan.bytes_total,
+        plan.file_count,
+        cancel,
+        on_progress,
+    )
 }
 
 fn watch_child(
     mut child: Child,
     bytes_total: Option<u64>,
+    file_count: u64,
     cancel: Arc<AtomicBool>,
     on_progress: &impl Fn(Progress),
 ) -> Result<TransferResult> {
@@ -941,6 +960,9 @@ fn watch_child(
     // (ssh) can keep a write end open briefly after the parent has exited.
     let mut exited_at: Option<Instant> = None;
     let mut data_complete = false;
+    let mut files_done = 0u64;
+    let files_total = (file_count > 0).then_some(file_count);
+    let mut last_percent: Option<f32> = None;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -951,14 +973,22 @@ fn watch_child(
             Ok(RsyncChunk::Done) => {
                 streams_done = streams_done.saturating_add(1);
             }
-            Ok(chunk) => {
-                let (line, is_err_text) = match chunk {
-                    RsyncChunk::ProgressLine(line) => (line, false),
-                    RsyncChunk::ErrText(line) => (line, true),
-                    RsyncChunk::Done => unreachable!(),
-                };
+            Ok(RsyncChunk::FileItem) => {
+                files_done = count_file_done(files_done, files_total);
+                on_progress(make_progress(
+                    bytes_done,
+                    bytes_total,
+                    rate_bps,
+                    last_percent,
+                    data_complete,
+                    files_done,
+                    files_total,
+                ));
+            }
+            Ok(RsyncChunk::ProgressLine(line)) => {
                 if let Some(parsed) = parse_progress2(&line) {
                     bytes_done = parsed.bytes_done;
+                    last_percent = parsed.percent.map(|p| p as f32);
                     if let Some(r) = parsed.bytes_per_sec {
                         rate_bps = Some(r);
                     } else {
@@ -983,8 +1013,10 @@ fn watch_child(
                         bytes_done,
                         bytes_total,
                         rate_bps,
-                        parsed.percent.map(|p| p as f32),
+                        last_percent,
                         data_complete,
+                        files_done,
+                        files_total,
                     );
                     if data_complete {
                         prog.message = "Done".into();
@@ -993,7 +1025,10 @@ fn watch_child(
                     on_progress(prog);
                     // Keep waiting for rsync to exit. Progress can hit 100% / to-chk=0
                     // while the last file is still being written; killing here truncated it.
-                } else if is_err_text && !line.trim().is_empty() {
+                }
+            }
+            Ok(RsyncChunk::ErrText(line)) => {
+                if !line.trim().is_empty() {
                     err_buf.push_str(&line);
                     if !line.ends_with('\n') {
                         err_buf.push('\n');
@@ -1038,6 +1073,9 @@ fn watch_child(
                         err_buf.push('\n');
                     }
                 }
+                Ok(RsyncChunk::FileItem) => {
+                    files_done = count_file_done(files_done, files_total);
+                }
                 Ok(RsyncChunk::ProgressLine(line)) => {
                     if let Some(parsed) = parse_progress2(&line) {
                         bytes_done = parsed.bytes_done;
@@ -1071,6 +1109,9 @@ fn watch_child(
     if let Some(total) = bytes_total {
         bytes_done = bytes_done.max(total);
     }
+    if let Some(total) = files_total {
+        files_done = total;
+    }
     on_progress(Progress {
         bytes_done,
         bytes_total,
@@ -1081,6 +1122,8 @@ fn watch_child(
         eta_secs: Some(0),
         percent: Some(100.0),
         data_complete: true,
+        files_done,
+        files_total,
     });
     Ok(TransferResult {
         bytes_transferred: bytes_done,
@@ -1101,6 +1144,8 @@ fn make_progress(
     rate_bps: Option<f64>,
     percent: Option<f32>,
     data_complete: bool,
+    files_done: u64,
+    files_total: Option<u64>,
 ) -> Progress {
     let eta_secs = if data_complete {
         Some(0)
@@ -1123,6 +1168,8 @@ fn make_progress(
         eta_secs,
         percent,
         data_complete,
+        files_done,
+        files_total,
     }
 }
 
@@ -1134,6 +1181,7 @@ enum StreamKind {
 
 enum RsyncChunk {
     ProgressLine(String),
+    FileItem,
     ErrText(String),
     Done,
 }
@@ -1172,14 +1220,31 @@ fn emit_rsync_line(
     line: String,
     tx: &mpsc::Sender<RsyncChunk>,
 ) -> Result<(), mpsc::SendError<RsyncChunk>> {
-    match kind {
-        // progress2 lands on stdout for modern rsync; still accept it on stderr.
-        StreamKind::Stdout | StreamKind::Stderr if parse_progress2(&line).is_some() => {
-            tx.send(RsyncChunk::ProgressLine(line))
-        }
-        StreamKind::Stderr => tx.send(RsyncChunk::ErrText(line)),
-        StreamKind::Stdout => Ok(()), // ignore non-progress stdout
+    if parse_progress2(&line).is_some() {
+        return tx.send(RsyncChunk::ProgressLine(line));
     }
+    if is_transferred_file_itemize(&line) {
+        return tx.send(RsyncChunk::FileItem);
+    }
+    match kind {
+        StreamKind::Stderr => tx.send(RsyncChunk::ErrText(line)),
+        StreamKind::Stdout => Ok(()),
+    }
+}
+
+fn count_file_done(files_done: u64, files_total: Option<u64>) -> u64 {
+    let next = files_done.saturating_add(1);
+    match files_total {
+        Some(total) => next.min(total),
+        None => next,
+    }
+}
+
+/// rsync `--out-format=%i` / itemize: `YXcstpoguax`. Count transferred files only.
+fn is_transferred_file_itemize(line: &str) -> bool {
+    let code = line.trim().split_whitespace().next().unwrap_or("");
+    let b = code.as_bytes();
+    b.len() >= 2 && matches!(b[0], b'>' | b'<' | b'c') && b[1] == b'f'
 }
 
 struct ParsedProgress {
@@ -1318,6 +1383,20 @@ mod tests {
         let p =
             parse_progress2("  1,048,576  100%  10.00MB/s    0:00:01 (xfr#4, to-chk=0/4)").unwrap();
         assert!(transfer_data_complete(&p));
+    }
+
+    #[test]
+    fn itemize_counts_files_not_directories() {
+        assert!(is_transferred_file_itemize(">f+++++++++"));
+        assert!(is_transferred_file_itemize("<f.st...... path/to/file"));
+        assert!(is_transferred_file_itemize("cf+++++++++"));
+        assert!(!is_transferred_file_itemize("cd+++++++++"));
+        assert!(!is_transferred_file_itemize(".d..t......"));
+        assert!(!is_transferred_file_itemize(".f....o...."));
+        assert!(!is_transferred_file_itemize(""));
+        assert_eq!(count_file_done(0, Some(5)), 1);
+        assert_eq!(count_file_done(4, Some(5)), 5);
+        assert_eq!(count_file_done(5, Some(5)), 5);
     }
 
     #[test]

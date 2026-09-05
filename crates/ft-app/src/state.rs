@@ -828,6 +828,7 @@ impl AppState {
         self.cancel.store(false, Ordering::SeqCst);
         self.progress = Progress {
             bytes_total: plan.bytes_total,
+            files_total: (plan.file_count > 0).then_some(plan.file_count),
             indeterminate: plan.bytes_total.is_none(),
             ..Default::default()
         };
