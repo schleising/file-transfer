@@ -27,6 +27,38 @@ pub enum BgMsg {
     TransferDone(Result<(u64, bool), String>),
 }
 
+#[derive(Clone)]
+struct BgTx {
+    tx: Sender<BgMsg>,
+    pending: Arc<AtomicBool>,
+}
+
+impl BgTx {
+    fn pair() -> (Self, Receiver<BgMsg>) {
+        let (tx, rx) = mpsc::channel();
+        (
+            Self {
+                tx,
+                pending: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+
+    fn send(&self, msg: BgMsg) {
+        let _ = self.tx.send(msg);
+        self.pending.store(true, Ordering::Release);
+    }
+
+    fn pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+    }
+
+    fn clear_pending(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BrowseTarget {
     Source,
@@ -178,18 +210,17 @@ pub struct AppState {
     pub folder_browser: Option<FolderBrowser>,
     pub location_picker: Option<LocationPicker>,
 
-    tx: Sender<BgMsg>,
+    bg: BgTx,
     rx: Receiver<BgMsg>,
 }
 
 impl AppState {
     pub fn new() -> Result<Self> {
         let store = Store::open_default()?;
-        let discovery = Discovery::start().ok();
-        let (tx, rx) = mpsc::channel();
+        let (bg, rx) = BgTx::pair();
         let mut app = Self {
             store,
-            discovery,
+            discovery: None,
             tab: NavTab::Source,
             computers: vec![],
             locations: vec![],
@@ -215,7 +246,7 @@ impl AppState {
             computer_msg: String::new(),
             folder_browser: None,
             location_picker: None,
-            tx,
+            bg,
             rx,
         };
         app.reload_store();
@@ -244,6 +275,28 @@ impl AppState {
             .as_ref()
             .map(|d| d.hosts())
             .unwrap_or_default()
+    }
+
+    pub fn bg_pending(&self) -> bool {
+        self.bg.pending()
+    }
+
+    pub fn bg_work_active(&self) -> bool {
+        self.transferring
+            || self.listing
+            || matches!(self.access, AccessCheck::Testing)
+            || self.folder_browser.as_ref().is_some_and(|b| b.loading)
+    }
+
+    fn ensure_discovery(&mut self) {
+        if self.discovery.is_none() {
+            self.discovery = Discovery::start().ok();
+        }
+    }
+
+    pub fn close_location_picker(&mut self) {
+        self.location_picker = None;
+        self.discovery = None;
     }
 
     pub fn location_groups(&self) -> Vec<(Computer, Vec<Location>)> {
@@ -424,13 +477,13 @@ impl AppState {
             BrowseTarget::Source => {
                 let id = self.ensure_location(computer_id, path);
                 self.apply_location_selection(Some(id), Side::Source);
-                self.location_picker = None;
+                self.close_location_picker();
                 self.start_list();
             }
             BrowseTarget::Dest => {
                 let id = self.ensure_location(computer_id, path);
                 self.apply_location_selection(Some(id), Side::Dest);
-                self.location_picker = None;
+                self.close_location_picker();
             }
         }
     }
@@ -448,14 +501,14 @@ impl AppState {
             browser.loading = true;
             browser.error = None;
         }
-        let tx = self.tx.clone();
+        let bg = self.bg.clone();
         std::thread::spawn(move || {
             let host = AppState::host_ref(&c);
             if path == Path::new("~") {
                 path = match ft_exec::remote_home(&host) {
                     Ok(h) => h,
                     Err(e) => {
-                        let _ = tx.send(BgMsg::BrowseList {
+                        bg.send(BgMsg::BrowseList {
                             path: PathBuf::from("~"),
                             result: Err(format!("{e:#}")),
                         });
@@ -464,7 +517,7 @@ impl AppState {
                 };
             }
             let result = ft_exec::list_dir(&host, &path).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(BgMsg::BrowseList { path, result });
+            bg.send(BgMsg::BrowseList { path, result });
         });
     }
 
@@ -521,6 +574,7 @@ impl AppState {
     }
 
     pub fn poll_bg(&mut self) {
+        self.bg.clear_pending();
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 BgMsg::ListResult(r) => {
@@ -609,11 +663,11 @@ impl AppState {
         self.listing = true;
         self.list_error = None;
         self.list_loaded_for = None;
-        let tx = self.tx.clone();
+        let bg = self.bg.clone();
         std::thread::spawn(move || {
             let host = AppState::host_ref(&c);
             let res = ft_exec::list_dir(&host, &loc.path).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(BgMsg::ListResult(res));
+            bg.send(BgMsg::ListResult(res));
         });
     }
 
@@ -691,7 +745,7 @@ impl AppState {
         self.status_line.clear();
         self.cancel.store(false, Ordering::SeqCst);
         self.folder_browser = None;
-        self.location_picker = None;
+        self.close_location_picker();
         self.tab = NavTab::Source;
     }
 
@@ -751,7 +805,7 @@ impl AppState {
         };
         self.access = AccessCheck::Testing;
         let gen = self.preflight_gen;
-        let tx = self.tx.clone();
+        let bg = self.bg.clone();
         std::thread::spawn(move || {
             let (source, dest, source_base, dest_base, relatives) = inputs;
             let result = ft_exec::plan_transfer(source, dest, source_base, dest_base, relatives)
@@ -760,7 +814,7 @@ impl AppState {
                     Ok(plan)
                 })
                 .map_err(|e| format!("{e:#}"));
-            let _ = tx.send(BgMsg::Preflight { gen, result });
+            bg.send(BgMsg::Preflight { gen, result });
         });
     }
 
@@ -813,23 +867,23 @@ impl AppState {
         };
         self.status_line = "Transferring…".into();
 
-        let tx = self.tx.clone();
+        let bg = self.bg.clone();
         let cancel = self.cancel.clone();
 
         std::thread::spawn(move || {
             let on_prog = {
-                let tx = tx.clone();
+                let bg = bg.clone();
                 move |p: Progress| {
-                    let _ = tx.send(BgMsg::Progress(p));
+                    bg.send(BgMsg::Progress(p));
                 }
             };
             let result = ft_exec::run_transfer(&plan, cancel, on_prog);
             match result {
                 Ok(r) => {
-                    let _ = tx.send(BgMsg::TransferDone(Ok((r.bytes_transferred, r.cancelled))));
+                    bg.send(BgMsg::TransferDone(Ok((r.bytes_transferred, r.cancelled))));
                 }
                 Err(e) => {
-                    let _ = tx.send(BgMsg::TransferDone(Err(truncate_err(&format!("{e:#}")))));
+                    bg.send(BgMsg::TransferDone(Err(truncate_err(&format!("{e:#}")))));
                 }
             }
         });
@@ -948,6 +1002,7 @@ impl AppState {
             show_manual_host: false,
         });
         self.computer_msg.clear();
+        self.ensure_discovery();
     }
 
     pub fn picker_set_computer(&mut self, id: Uuid) {
@@ -1046,7 +1101,7 @@ impl AppState {
                 if side == Side::Source {
                     self.start_list();
                 }
-                self.location_picker = None;
+                self.close_location_picker();
             } else {
                 self.computer_msg = "Path required".into();
             }

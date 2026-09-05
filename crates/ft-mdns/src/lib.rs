@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -16,25 +15,24 @@ pub struct DiscoveredHost {
 }
 
 /// Snapshot of currently known `_ssh._tcp` services.
-#[derive(Clone, Default)]
+/// Dropping this shuts down the mDNS daemon thread.
 pub struct Discovery {
     inner: Arc<Mutex<HashMap<String, DiscoveredHost>>>,
+    daemon: ServiceDaemon,
 }
 
 impl Discovery {
     pub fn start() -> Result<Self> {
-        let discovery = Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-        };
-        let map = discovery.inner.clone();
+        let inner = Arc::new(Mutex::new(HashMap::new()));
+        let daemon = ServiceDaemon::new().context("mdns daemon")?;
+        let receiver = daemon
+            .browse("_ssh._tcp.local.")
+            .context("browse _ssh._tcp")?;
+        let map = inner.clone();
         std::thread::Builder::new()
             .name("ft-mdns".into())
-            .spawn(move || {
-                if let Err(e) = browse_loop(map) {
-                    eprintln!("mdns browse ended: {e:#}");
-                }
-            })?;
-        Ok(discovery)
+            .spawn(move || browse_loop(map, receiver))?;
+        Ok(Self { inner, daemon })
     }
 
     pub fn hosts(&self) -> Vec<DiscoveredHost> {
@@ -45,32 +43,36 @@ impl Discovery {
     }
 }
 
-fn browse_loop(map: Arc<Mutex<HashMap<String, DiscoveredHost>>>) -> Result<()> {
-    let daemon = ServiceDaemon::new().context("mdns daemon")?;
-    let receiver = daemon
-        .browse("_ssh._tcp.local.")
-        .context("browse _ssh._tcp")?;
+impl Drop for Discovery {
+    fn drop(&mut self) {
+        let _ = self.daemon.shutdown();
+    }
+}
 
+fn browse_loop(
+    map: Arc<Mutex<HashMap<String, DiscoveredHost>>>,
+    receiver: mdns_sd::Receiver<ServiceEvent>,
+) {
     loop {
-        match receiver.recv_timeout(Duration::from_secs(2)) {
+        match receiver.recv() {
             Ok(ServiceEvent::ServiceResolved(info)) => {
                 let fullname = info.get_fullname().to_string();
                 let host = info.get_hostname().trim_end_matches('.').to_string();
                 let short = fullname.split('.').next().unwrap_or(&fullname).to_string();
-                let entry = DiscoveredHost {
-                    name: short,
-                    host,
-                    port: info.get_port(),
-                };
-                map.lock().unwrap().insert(fullname, entry);
+                map.lock().unwrap().insert(
+                    fullname,
+                    DiscoveredHost {
+                        name: short,
+                        host,
+                        port: info.get_port(),
+                    },
+                );
             }
             Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
                 map.lock().unwrap().remove(&fullname);
             }
             Ok(_) => {}
-            Err(flume::RecvTimeoutError::Timeout) => {}
-            Err(flume::RecvTimeoutError::Disconnected) => break,
+            Err(_) => break,
         }
     }
-    Ok(())
 }

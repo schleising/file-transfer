@@ -17,13 +17,31 @@ pub fn app() -> Element {
 
     use_future(move || async move {
         loop {
-            let busy = {
+            let visible = dioxus::desktop::window().window.is_visible();
+            let (busy, pending, picker_open) = {
                 let s = state.read();
-                s.transferring || matches!(s.access, AccessCheck::Testing)
+                (
+                    s.bg_work_active(),
+                    s.bg_pending(),
+                    s.location_picker.is_some(),
+                )
             };
-            let ms = if busy { 100 } else { 250 };
+            if pending {
+                state.write().poll_bg();
+            } else if picker_open && visible {
+                // Bonjour updates a map in the mdns thread; refresh the sheet so hosts appear.
+                let _ = state.write();
+            }
+            let ms = if !visible && !busy {
+                1000
+            } else if busy {
+                100
+            } else if picker_open {
+                500
+            } else {
+                250
+            };
             futures_timer::Delay::new(std::time::Duration::from_millis(ms)).await;
-            state.write().poll_bg();
         }
     });
 
@@ -891,7 +909,7 @@ fn LocationPickerSheet() -> Element {
     rsx! {
         div {
             class: "backdrop",
-            onclick: move |_| state.write().location_picker = None,
+            onclick: move |_| state.write().close_location_picker(),
             div {
                 class: "sheet",
                 onclick: move |evt| evt.stop_propagation(),
@@ -1008,7 +1026,7 @@ fn LocationPickerSheet() -> Element {
                     }
                 }
                 div { class: "sheet-actions",
-                    button { class: "btn", onclick: move |_| state.write().location_picker = None, "Cancel" }
+                    button { class: "btn", onclick: move |_| state.write().close_location_picker(), "Cancel" }
                     button {
                         class: "btn",
                         onclick: move |_| state.write().picker_browse(),

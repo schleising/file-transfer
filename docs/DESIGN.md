@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.0.0**). This document describes the **as-built** system in this repo. App and local crate versions live in Cargo.toml (`workspace.package.version`, inherited unless a crate sets its own); bump with semver on shipped changes.
+**Status:** Implemented (personal-use **1.0.1**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on shipped changes, and only crates that actually changed.
 
 ## 1. Overview
 
@@ -126,7 +126,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 ## 5. Discovery (Avahi / Bonjour)
 
-- Crate `ft-mdns` browses **`_ssh._tcp.local.`** via the `mdns-sd` crate.
+- Crate `ft-mdns` browses **`_ssh._tcp.local.`** via the `mdns-sd` crate **only while the Add Location sheet is open** (the daemon is shut down when the sheet closes).
 - The **Add Location** sheet lists discoveries as **Discovered on Network**; **Add Host** saves into the store.
 - **Add host manually** (display name, SSH destination, optional port) remains supported.
 - There is no dedicated Computers tab and no in-app “Test SSH” action; reachability is the transfer preflight.
@@ -310,6 +310,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 - Primary actions: **Continue** / **Reset** / **Transfer** use the system blue accent.
 - Packaging: minimal `Info.plist` + `AppIcon.icns` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
 - macOS extra: template menu-bar icon; left-click toggles the window; menu has Open at Login and Quit. Close button **hides** the window (`WindowCloseBehaviour::WindowHides`).
+- Background UI loop: drain the transfer channel only when a message is pending (a Dioxus `write()` otherwise re-renders the whole app); poll slower while the window is hidden and idle. Bonjour host names in the Add Location sheet refresh about twice a second while that sheet is visible.
 
 ---
 

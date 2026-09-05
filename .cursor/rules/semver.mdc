@@ -1,24 +1,30 @@
 ---
-description: Bump app and local crate versions with semver on every change
+description: Bump only crates that actually changed; workspace version is the app
 alwaysApply: true
 ---
 
 # Semantic versions
 
-After any change that ships in this repo, bump versions in the **same turn** before finishing. Do not leave the previous version on changed crates.
+After any change that ships in this repo, bump versions in the **same turn** before finishing. Do not leave the previous version on **changed** crates.
 
-## What to bump
+## Which crates
 
-- **App:** `[workspace.package].version` in the root `Cargo.toml`. All local crates inherit it via `version.workspace = true` unless a crate has its own `version = "x.y.z"`.
-- **Independent crate:** if only some crates should move, set `version = "x.y.z"` in that crate’s `Cargo.toml` (drop `version.workspace = true`) and bump just those crates plus the **app** whenever `ft-app` still consumes the change.
-- Run a cargo command afterward so `Cargo.lock` matches. `scripts/install-app.sh` reads the `ft-app` version into `Info.plist` — do not hardcode it there.
+Bump **only crates whose own sources, manifest, or crate-specific docs changed** in this unit of work. Do **not** bump a crate because a sibling moved, because the app moved, or because you raised `[workspace.package].version`.
+
+`[workspace.package].version` in the root `Cargo.toml` is the **app** version. `ft-app` keeps `version.workspace = true`.
+
+Any other crate (`ft-exec`, `ft-store`, `ft-mdns`, …) may use `version.workspace = true` **only if that crate is also bumping in this same unit of work**. If it did not change, it **must** pin `version = "x.y.z"` (drop `version.workspace = true`) at the version it already published. Leaving `version.workspace = true` on an unchanged crate silently gives it the new app version — that is always wrong.
+
+When a previously pinned crate changes later, bump **that crate’s** `version =`, and bump the **app** whenever `ft-app` still consumes the change.
+
+Run a cargo command afterward so `Cargo.lock` matches. `scripts/install-app.sh` reads the `ft-app` version into `Info.plist` — do not hardcode it there.
 
 ## Which number
 
-Use [semver](https://semver.org): `MAJOR.MINOR.PATCH`.
+Use [semver](https://semver.org): `MAJOR.MINOR.PATCH`. Apply the tier to **each bumped crate independently** (a docs-only app fix is a PATCH on `ft-app` even if a library stayed at an older MINOR).
 
 - **PATCH** (`1.0.0` → `1.0.1`): bug fixes, styling, docs, cleanup, no new capability
 - **MINOR** (`1.0.1` → `1.1.0`): new backward-compatible behavior or UI
 - **MAJOR** (`1.1.0` → `2.0.0`): breaking behavior, removed features, incompatible data/store changes
 
-Bump once per unit of work (the highest tier that applies). The sidebar brand and crate hover list come from each crate’s `CARGO_PKG_VERSION`.
+Bump once per unit of work per crate (the highest tier that applies to that crate). The sidebar brand and crate hover list come from each crate’s `CARGO_PKG_VERSION`.
