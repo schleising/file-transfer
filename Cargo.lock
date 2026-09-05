@@ -1426,6 +1426,7 @@ dependencies = [
  "ft-mdns",
  "ft-store",
  "futures-timer",
+ "objc2",
  "uuid",
 ]
 

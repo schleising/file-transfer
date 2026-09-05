@@ -1,40 +1,46 @@
 mod icons;
+#[cfg(target_os = "macos")]
+mod macos;
 mod state;
 mod ui;
 mod util;
 
 fn main() {
     let window = {
-        let builder = dioxus::desktop::WindowBuilder::new()
+        let mut builder = dioxus::desktop::WindowBuilder::new()
             .with_title("File Transfer")
             .with_inner_size(dioxus::desktop::LogicalSize::new(1120.0, 740.0))
             .with_min_inner_size(dioxus::desktop::LogicalSize::new(900.0, 560.0));
         #[cfg(target_os = "macos")]
         {
             use dioxus::desktop::tao::platform::macos::WindowBuilderExtMacOS;
-            builder
+            builder = builder
                 .with_titlebar_transparent(true)
                 .with_fullsize_content_view(true)
                 .with_title_hidden(true)
+                .with_visible(false);
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            builder
-        }
+        builder
     };
 
-    dioxus::LaunchBuilder::desktop()
-        .with_cfg(
-            dioxus::desktop::Config::new()
-                .with_window(window)
-                .with_menu(native_menu())
-                .with_background_color((245, 245, 247, 255))
-                .with_custom_head(format!(
-                    "<style>{}</style>",
-                    include_str!("../assets/macos.css")
-                )),
-        )
-        .launch(ui::app);
+    let mut cfg = dioxus::desktop::Config::new()
+        .with_window(window)
+        .with_menu(native_menu())
+        .with_background_color((245, 245, 247, 255))
+        .with_custom_head(format!(
+            "<style>{}</style>",
+            include_str!("../assets/macos.css")
+        ));
+    #[cfg(target_os = "macos")]
+    {
+        use dioxus::desktop::WindowCloseBehaviour;
+        cfg = cfg
+            .with_close_behaviour(WindowCloseBehaviour::WindowHides)
+            .with_exits_when_last_window_closes(false)
+            .with_tray_icon_show_window_on_click(false);
+    }
+
+    dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(ui::app);
 }
 
 fn native_menu() -> dioxus::desktop::muda::Menu {

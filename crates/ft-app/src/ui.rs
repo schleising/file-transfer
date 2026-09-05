@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub fn app() -> Element {
     let mut state = use_signal(|| AppState::new().expect("open File Transfer store"));
     use_context_provider(|| state);
+    #[cfg(target_os = "macos")]
+    crate::macos::attach_menubar();
 
     use_future(move || async move {
         loop {
