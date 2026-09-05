@@ -62,6 +62,8 @@
 
 * {
   box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 svg.glyph {
@@ -84,6 +86,7 @@ body,
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   user-select: none;
+  -webkit-user-select: none;
   cursor: default;
   overflow: hidden;
   overscroll-behavior: none;
@@ -99,6 +102,7 @@ input[type="search"],
 input[type="password"],
 textarea {
   user-select: text;
+  -webkit-user-select: text;
   cursor: text;
 }
 
@@ -114,6 +118,16 @@ textarea {
   grid-template-columns: 248px 1fr;
   grid-template-rows: 1fr auto;
   height: 100%;
+}
+
+.titlebar-drag {
+  position: fixed;
+  top: 0;
+  left: 72px;
+  right: 0;
+  height: 52px;
+  z-index: 20;
+  -webkit-app-region: drag;
 }
 
 .sidebar {

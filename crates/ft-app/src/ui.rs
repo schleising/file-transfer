@@ -25,6 +25,7 @@ pub fn app() -> Element {
 
     rsx! {
         div { class: "app",
+            TitlebarDrag {}
             Sidebar {}
             section { class: "main",
                 div { class: "page",
@@ -46,6 +47,17 @@ pub fn app() -> Element {
         }
         if show_browser {
             FolderBrowserSheet {}
+        }
+    }
+}
+
+#[component]
+fn TitlebarDrag() -> Element {
+    let desktop = dioxus::desktop::use_window();
+    rsx! {
+        div {
+            class: "titlebar-drag",
+            onmousedown: move |_| desktop.drag(),
         }
     }
 }
