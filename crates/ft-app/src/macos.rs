@@ -1,9 +1,10 @@
 //! macOS menubar extra, login-item, and launch visibility.
 
+use crate::state::AppState;
 use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::trayicon::menu::{CheckMenuItem, Menu, MenuId, PredefinedMenuItem};
 use dioxus::desktop::trayicon::{
-    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
 };
 use dioxus::desktop::{
     use_muda_event_handler, use_tray_icon_event_handler, use_tray_menu_event_handler,
@@ -35,14 +36,9 @@ static PROCESS_START_MS: AtomicU64 = AtomicU64::new(0);
 
 const STARTUP_REOPEN_GRACE_MS: u64 = 2500;
 
-#[derive(Clone)]
-struct TrayHandles {
-    _tray: TrayIcon,
-}
-
 pub fn attach_menubar() {
     let _ = PROCESS_START_MS.compare_exchange(0, now_ms(), Ordering::SeqCst, Ordering::SeqCst);
-    let open_at_login = use_hook(|| {
+    let (open_at_login, tray) = use_hook(|| {
         let open_at_login = CheckMenuItem::new("Open at Login", true, login_item_enabled(), None);
         let menu = Menu::new();
         let _ = menu.append_items(&[
@@ -58,8 +54,30 @@ pub fn attach_menubar() {
             .with_menu_on_left_click(false)
             .build()
             .expect("menubar extra");
-        provide_context(TrayHandles { _tray: tray });
-        Rc::new(open_at_login)
+        (Rc::new(open_at_login), tray)
+    });
+
+    let state = use_context::<Signal<AppState>>();
+    let mut tray_busy = use_signal(|| false);
+    use_effect(move || {
+        let transferring = state.read().transferring;
+        if *tray_busy.peek() == transferring {
+            return;
+        }
+        tray_busy.set(transferring);
+        let _ = tray.set_icon_with_as_template(
+            Some(if transferring {
+                menubar_icon_busy()
+            } else {
+                menubar_icon()
+            }),
+            true,
+        );
+        let _ = tray.set_tooltip(Some(if transferring {
+            "File Transfer — transferring"
+        } else {
+            "File Transfer"
+        }));
     });
 
     use_wry_event_handler(|event, _| match event {
@@ -372,15 +390,53 @@ fn bootstrap_agent(plist: &Path) -> bool {
 }
 
 fn menubar_icon() -> Icon {
+    icon_from_pixels(paint_transfer_arrows)
+}
+
+fn menubar_icon_busy() -> Icon {
+    icon_from_pixels(|px, s| {
+        paint_transfer_arrows(px, s);
+        draw_circle(px, s, 21, 22, 18);
+    })
+}
+
+fn icon_from_pixels(paint: impl FnOnce(&mut [u8], u32)) -> Icon {
     const S: u32 = 44;
     let mut px = vec![0u8; (S * S * 4) as usize];
-    draw_line(&mut px, S, 8, 14, 32, 14);
-    draw_line(&mut px, S, 24, 8, 32, 14);
-    draw_line(&mut px, S, 24, 20, 32, 14);
-    draw_line(&mut px, S, 36, 30, 12, 30);
-    draw_line(&mut px, S, 20, 24, 12, 30);
-    draw_line(&mut px, S, 20, 36, 12, 30);
+    paint(&mut px, S);
     Icon::from_rgba(px, S, S).expect("menubar icon")
+}
+
+fn paint_transfer_arrows(px: &mut [u8], s: u32) {
+    draw_line(px, s, 8, 14, 32, 14);
+    draw_line(px, s, 24, 8, 32, 14);
+    draw_line(px, s, 24, 20, 32, 14);
+    draw_line(px, s, 36, 30, 12, 30);
+    draw_line(px, s, 20, 24, 12, 30);
+    draw_line(px, s, 20, 36, 12, 30);
+}
+
+fn draw_circle(px: &mut [u8], s: u32, cx: i32, cy: i32, r: i32) {
+    let mut x = r;
+    let mut y = 0;
+    let mut err = 0;
+    while x >= y {
+        stamp(px, s, cx + x, cy + y);
+        stamp(px, s, cx + y, cy + x);
+        stamp(px, s, cx - y, cy + x);
+        stamp(px, s, cx - x, cy + y);
+        stamp(px, s, cx - x, cy - y);
+        stamp(px, s, cx - y, cy - x);
+        stamp(px, s, cx + y, cy - x);
+        stamp(px, s, cx + x, cy - y);
+        y += 1;
+        if err <= 0 {
+            err += 2 * y + 1;
+        } else {
+            x -= 1;
+            err += 2 * (y - x) + 1;
+        }
+    }
 }
 
 fn draw_line(px: &mut [u8], s: u32, x0: i32, y0: i32, x1: i32, y1: i32) {

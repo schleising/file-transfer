@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.0.1**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on shipped changes, and only crates that actually changed.
+**Status:** Implemented (personal-use **1.1.0**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on shipped changes, and only crates that actually changed.
 
 ## 1. Overview
 
@@ -309,7 +309,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 - Locations: Finder-like **tiles** grouped by host; live drag-reorder; Add folder / Add Location.
 - Primary actions: **Continue** / **Reset** / **Transfer** use the system blue accent.
 - Packaging: minimal `Info.plist` + `AppIcon.icns` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
-- macOS extra: template menu-bar icon; left-click toggles the window; menu has Open at Login and Quit. Close button **hides** the window (`WindowCloseBehaviour::WindowHides`).
+- macOS extra: template menu-bar icon (a ring around the arrows while a transfer is running, then the default glyph); left-click toggles the window; menu has Open at Login and Quit. Close button **hides** the window (`WindowCloseBehaviour::WindowHides`).
 - Background UI loop: drain the transfer channel only when a message is pending (a Dioxus `write()` otherwise re-renders the whole app); poll slower while the window is hidden and idle. Bonjour host names in the Add Location sheet refresh about twice a second while that sheet is visible.
 
 ---
