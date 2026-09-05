@@ -23,24 +23,18 @@ pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
-    pub mtime: i64,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Progress {
     pub bytes_done: u64,
     pub bytes_total: Option<u64>,
-    pub current_file: Option<String>,
-    pub indeterminate: bool,
-    pub message: String,
     /// Instantaneous or smoothed transfer rate (bytes/sec), when known.
     pub bytes_per_sec: Option<f64>,
     /// Estimated seconds remaining, when total and rate are known.
     pub eta_secs: Option<u64>,
     /// Rsync's own progress percent (0–100), when parsed from progress2.
     pub percent: Option<f32>,
-    /// True once rsync reports `to-chk=0` (UI may show complete; process still runs to exit).
-    pub data_complete: bool,
     /// Files transferred so far (`xfr#` from progress2).
     pub files_done: u64,
     /// Total files in the transfer, when known.
@@ -73,7 +67,6 @@ pub struct TransferPlan {
 pub struct TransferResult {
     pub bytes_transferred: u64,
     pub cancelled: bool,
-    pub message: String,
 }
 
 pub fn find_homebrew_rsync() -> Result<PathBuf> {
@@ -242,17 +235,10 @@ fn list_dir_local(path: &Path) -> Result<Vec<DirEntry>> {
         if name == "." || name == ".." || name.starts_with('.') {
             continue;
         }
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         entries.push(DirEntry {
             name,
             is_dir: meta.is_dir(),
             size: if meta.is_file() { meta.len() } else { 0 },
-            mtime,
         });
     }
     entries.sort_by(|a, b| {
@@ -341,7 +327,7 @@ done
         let mut parts = line.splitn(4, '\t');
         let t = parts.next().unwrap_or("");
         let sz: u64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
-        let mt: i64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+        let _mt = parts.next();
         let name = parts.next().unwrap_or("").to_string();
         if name.is_empty() || name.starts_with('.') {
             continue;
@@ -350,7 +336,6 @@ done
             name,
             is_dir: t == "d",
             size: sz,
-            mtime: mt,
         });
     }
     entries.sort_by(|a, b| {
@@ -673,17 +658,12 @@ pub fn run_transfer(
 ) -> Result<TransferResult> {
     preflight_start(plan)?;
     let rsync = find_homebrew_rsync()?;
-    // Re-expand in case plan was built without expansion; ensures folder contents transfer.
-    let paths = expand_selection(&plan.source, &plan.source_base, &plan.relative_paths)
-        .unwrap_or_else(|_| plan.relative_paths.clone());
+    // `plan_transfer` already expanded folders into file paths.
+    let paths = &plan.relative_paths;
     if paths.is_empty() {
         bail!("nothing to transfer after expanding folders");
     }
-    let files_from = write_files_from_list(&paths)?;
-
-    let mut plan = plan.clone();
-    plan.relative_paths = paths;
-    let plan = &plan;
+    let files_from = write_files_from_list(paths)?;
 
     let result = match plan.mode {
         TransferMode::LocalCopy | TransferMode::LocalToRemote | TransferMode::RemoteToLocal => {
@@ -1009,7 +989,7 @@ fn watch_child(
                     if transfer_data_complete(&parsed) {
                         data_complete = true;
                     }
-                    let mut prog = make_progress(
+                    let prog = make_progress(
                         bytes_done,
                         bytes_total,
                         rate_bps,
@@ -1018,10 +998,6 @@ fn watch_child(
                         files_done,
                         files_total,
                     );
-                    if data_complete {
-                        prog.message = "Done".into();
-                        prog.eta_secs = Some(0);
-                    }
                     on_progress(prog);
                     // Keep waiting for rsync to exit. Progress can hit 100% / to-chk=0
                     // while the last file is still being written; killing here truncated it.
@@ -1099,7 +1075,6 @@ fn watch_child(
         return Ok(TransferResult {
             bytes_transferred: bytes_done,
             cancelled: true,
-            message: "Cancelled".into(),
         });
     }
     if !status.success() {
@@ -1115,20 +1090,15 @@ fn watch_child(
     on_progress(Progress {
         bytes_done,
         bytes_total,
-        current_file: None,
-        indeterminate: false,
-        message: "Done".into(),
         bytes_per_sec: rate_bps,
         eta_secs: Some(0),
         percent: Some(100.0),
-        data_complete: true,
         files_done,
         files_total,
     });
     Ok(TransferResult {
         bytes_transferred: bytes_done,
         cancelled: false,
-        message: "OK".into(),
     })
 }
 
@@ -1161,13 +1131,9 @@ fn make_progress(
     Progress {
         bytes_done,
         bytes_total,
-        current_file: None,
-        indeterminate: bytes_total.is_none() && percent.is_none(),
-        message: String::new(),
         bytes_per_sec: rate_bps,
         eta_secs,
         percent,
-        data_complete,
         files_done,
         files_total,
     }
@@ -1242,7 +1208,7 @@ fn count_file_done(files_done: u64, files_total: Option<u64>) -> u64 {
 
 /// rsync `--out-format=%i` / itemize: `YXcstpoguax`. Count transferred files only.
 fn is_transferred_file_itemize(line: &str) -> bool {
-    let code = line.trim().split_whitespace().next().unwrap_or("");
+    let code = line.split_whitespace().next().unwrap_or("");
     let b = code.as_bytes();
     b.len() >= 2 && matches!(b[0], b'>' | b'<' | b'c') && b[1] == b'f'
 }
@@ -1322,18 +1288,12 @@ fn parse_rate_token(tok: &str) -> Option<f64> {
         (rest, 1024.0 * 1024.0)
     } else if let Some(rest) = lower.strip_suffix("kb/s") {
         (rest, 1024.0)
-    } else if let Some(rest) = lower.strip_suffix("b/s") {
-        (rest, 1.0)
     } else {
-        return None;
+        let rest = lower.strip_suffix("b/s")?;
+        (rest, 1.0)
     };
     let n: f64 = num.parse().ok()?;
     Some(n * mult)
-}
-
-/// Back-compat helper for tests / simple callers.
-pub fn parse_progress2_line(line: &str) -> Option<u64> {
-    parse_progress2(line).map(|p| p.bytes_done)
 }
 
 fn sanitize_error(stderr: &str) -> String {
@@ -1366,7 +1326,7 @@ mod tests {
 
     #[test]
     fn parse_progress_cr_style() {
-        let n = parse_progress2_line("    12345  10%  1.00MB/s    0:00:01");
+        let n = parse_progress2("    12345  10%  1.00MB/s    0:00:01").map(|p| p.bytes_done);
         assert_eq!(n, Some(12345));
     }
 

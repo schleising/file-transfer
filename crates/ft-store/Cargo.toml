@@ -9,6 +9,4 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 rusqlite.workspace = true
-serde.workspace = true
-thiserror.workspace = true
 uuid.workspace = true

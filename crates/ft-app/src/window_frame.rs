@@ -4,17 +4,19 @@ use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::{LogicalPosition, LogicalSize, WindowBuilder};
 use ft_store::Store;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const FRAME_KEY: &str = "window.frame";
 const SAVE_DEBOUNCE_MS: u64 = 400;
 
-pub const DEFAULT_WIDTH: f64 = 1280.0;
-pub const DEFAULT_HEIGHT: f64 = 840.0;
-pub const MIN_WIDTH: f64 = 900.0;
-pub const MIN_HEIGHT: f64 = 560.0;
+const DEFAULT_WIDTH: f64 = 1280.0;
+const DEFAULT_HEIGHT: f64 = 840.0;
+const MIN_WIDTH: f64 = 900.0;
+const MIN_HEIGHT: f64 = 560.0;
 
 static LAST_SAVE_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_PERSISTED: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug)]
 struct Frame {
@@ -90,13 +92,14 @@ fn load() -> Option<Frame> {
 }
 
 fn persist(frame: Frame) -> anyhow::Result<()> {
-    Store::open_default()?.set_setting(
-        FRAME_KEY,
-        &format!(
-            "{} {} {} {}",
-            frame.x, frame.y, frame.width, frame.height
-        ),
-    )
+    let value = format!("{} {} {} {}", frame.x, frame.y, frame.width, frame.height);
+    if let Ok(mut last) = LAST_PERSISTED.lock() {
+        if last.as_deref() == Some(value.as_str()) {
+            return Ok(());
+        }
+        *last = Some(value.clone());
+    }
+    Store::open_default()?.set_setting(FRAME_KEY, &value)
 }
 
 fn read_live_frame() -> Option<Frame> {

@@ -351,7 +351,6 @@ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "num-traits",
- "serde",
  "windows-link 0.2.1",
 ]
 
@@ -1410,7 +1409,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
- "thiserror 2.0.20",
  "uuid",
 ]
 
@@ -1431,8 +1429,6 @@ dependencies = [
  "chrono",
  "dirs",
  "rusqlite",
- "serde",
- "thiserror 2.0.20",
  "uuid",
 ]
 
@@ -4676,7 +4672,6 @@ checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 

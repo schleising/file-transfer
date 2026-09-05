@@ -164,7 +164,7 @@ There is no native `rfd` folder dialog.
 2. Multi-select files and/or folders → **Continue**.
 3. **Destination** — pick a saved folder (or add one).
 4. When source, files, and destination are all set, preflight runs automatically. **Access status** updates in the sidebar.
-5. **Transfer** → progress bar with rate and ETA; **Cancel** kills the local ssh/rsync child.
+5. **Transfer** reuses the cached preflight plan (no second folder expand) → progress bar with rate and ETA; **Cancel** kills the local ssh/rsync child.
 6. UI shows **Transfer complete** as soon as rsync reports payload done (see §8); SSH teardown continues in the background.
 7. **Reset** clears source/files/destination and access state (not saved hosts or folders).
 
@@ -224,7 +224,7 @@ Relative structure under the destination folder is preserved.
 5. **Completion semantics** — the UI may show 100% when progress2 reports `to-chk=0`. The transfer is only **successful** after rsync/ssh **exits 0**. Do not SIGKILL on `100%` or a progress stall: that can truncate the last file in a folder (`--inplace`). Drain both pipes until the child exits (cancel still kills the controller-side child).
 6. **Remote→remote** — orchestration SSH uses `-tt`; remote script prefers `stdbuf -oL` around rsync so progress streams instead of buffering until session exit.
 7. UI repaints on background progress messages while a transfer runs.
-8. Filenames are not persisted; optional in-memory “current file” is not used for progress2.
+8. Filenames are not persisted and are not shown in the progress bar.
 
 ### Cancel
 
@@ -275,7 +275,7 @@ Setting {
 }
 ```
 
-`identity_file` and location `kind` are stored for compatibility; the UI always writes `kind = either` and does not expose an identity-file picker. Hosts can be added from the location sheet; there is no in-app delete-computer control (`This Mac` cannot be deleted in the store).
+`identity_file` and location `kind` are stored for compatibility; the UI always writes `kind = either` and does not expose an identity-file picker. Hosts can be added from the location sheet; they cannot be deleted in-app.
 
 On first open, a **This Mac** computer and a **Home** location are created automatically.
 
@@ -385,7 +385,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Navigation | **Source → Files → Destination** wizard; no Computers / Locations / History tabs |
 | Locations | **Tiles per host**; drag to reorder; Add Location sheet for hosts + paths |
 | Folder pick | **In-app browser** for both This Mac and remotes (not `rfd`) |
-| Access | **Automatic preflight**; Transfer enabled only when Accessible |
+| Access | **Automatic preflight** caches the plan; Transfer enabled only when Accessible |
 | Window | Default **1280×840**; persist logical size + position in `settings` |
 | Close / login | **Hide to menu-bar extra**; Open at Login via LaunchAgent `--hidden` |
 | Remote→remote | Probe both; **prefer push** |

@@ -3,11 +3,10 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationKind {
     Source,
     Dest,
@@ -32,7 +31,7 @@ impl LocationKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Computer {
     pub id: Uuid,
     pub name: String,
@@ -47,7 +46,7 @@ pub struct Computer {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Location {
     pub id: Uuid,
     pub computer_id: Uuid,
@@ -147,9 +146,9 @@ impl Store {
                 "ALTER TABLE locations ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
-            let mut stmt = self
-                .conn
-                .prepare("SELECT id FROM locations WHERE computer_id = ?1 ORDER BY name COLLATE NOCASE")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM locations WHERE computer_id = ?1 ORDER BY name COLLATE NOCASE",
+            )?;
             let computer_ids: Vec<String> = self
                 .conn
                 .prepare("SELECT id FROM computers")?
@@ -232,9 +231,7 @@ impl Store {
                 name: row.get(1)?,
                 ssh_destination: row.get(2)?,
                 ssh_port: row.get::<_, Option<i64>>(3)?.map(|p| p as u16),
-                identity_file: row
-                    .get::<_, Option<String>>(4)?
-                    .map(PathBuf::from),
+                identity_file: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
                 bonjour_name: row.get(5)?,
                 last_seen_at: parse_opt_time(row.get(6)?)?,
                 is_local: row.get::<_, i64>(7)? != 0,
@@ -271,22 +268,6 @@ impl Store {
                 c.updated_at.to_rfc3339(),
             ],
         )?;
-        Ok(())
-    }
-
-    pub fn delete_computer(&self, id: Uuid) -> Result<()> {
-        let is_local: i64 = self.conn.query_row(
-            "SELECT is_local FROM computers WHERE id = ?1",
-            params![id.to_string()],
-            |r| r.get(0),
-        )?;
-        if is_local != 0 {
-            anyhow::bail!("cannot delete This Mac");
-        }
-        self.conn
-            .execute("DELETE FROM locations WHERE computer_id = ?1", params![id.to_string()])?;
-        self.conn
-            .execute("DELETE FROM computers WHERE id = ?1", params![id.to_string()])?;
         Ok(())
     }
 
@@ -339,20 +320,17 @@ impl Store {
             self.conn.execute(
                 "UPDATE locations SET sort_order = ?1, updated_at = ?2
                  WHERE id = ?3 AND computer_id = ?4",
-                params![
-                    index as i32,
-                    now,
-                    id.to_string(),
-                    computer_id.to_string(),
-                ],
+                params![index as i32, now, id.to_string(), computer_id.to_string(),],
             )?;
         }
         Ok(())
     }
 
     pub fn delete_location(&self, id: Uuid) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM locations WHERE id = ?1", params![id.to_string()])?;
+        self.conn.execute(
+            "DELETE FROM locations WHERE id = ?1",
+            params![id.to_string()],
+        )?;
         Ok(())
     }
 }
@@ -396,11 +374,7 @@ fn collect_mapped<T, I>(rows: I) -> Result<Vec<T>>
 where
     I: Iterator<Item = Result<T, rusqlite::Error>>,
 {
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -446,7 +420,9 @@ mod tests {
     fn settings_roundtrip() {
         let store = Store::open(":memory:").unwrap();
         assert_eq!(store.setting("window.frame").unwrap(), None);
-        store.set_setting("window.frame", "100 80 1280 840").unwrap();
+        store
+            .set_setting("window.frame", "100 80 1280 840")
+            .unwrap();
         assert_eq!(
             store.setting("window.frame").unwrap().as_deref(),
             Some("100 80 1280 840")

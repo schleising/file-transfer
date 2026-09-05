@@ -7,7 +7,7 @@ use ft_exec::{self, DirEntry, HostRef, Progress, TransferPlan};
 use ft_mdns::{DiscoveredHost, Discovery};
 use ft_store::{Computer, Location, LocationKind, Store};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -21,17 +21,10 @@ pub enum BgMsg {
     },
     Preflight {
         gen: u64,
-        result: Result<PreflightOk, String>,
+        result: Result<TransferPlan, String>,
     },
     Progress(Progress),
     TransferDone(Result<(u64, bool), String>),
-}
-
-#[derive(Clone)]
-pub struct PreflightOk {
-    pub message: String,
-    pub file_count: u64,
-    pub bytes_total: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -171,6 +164,7 @@ pub struct AppState {
 
     pub access: AccessCheck,
     preflight_gen: u64,
+    cached_plan: Option<TransferPlan>,
     pub progress: Progress,
     pub transferring: bool,
     pub status_line: String,
@@ -210,6 +204,7 @@ impl AppState {
             list_loaded_for: None,
             access: AccessCheck::Untested,
             preflight_gen: 0,
+            cached_plan: None,
             progress: Progress::default(),
             transferring: false,
             status_line: String::new(),
@@ -456,7 +451,7 @@ impl AppState {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let host = AppState::host_ref(&c);
-            if path == PathBuf::from("~") {
+            if path == Path::new("~") {
                 path = match ft_exec::remote_home(&host) {
                     Ok(h) => h,
                     Err(e) => {
@@ -565,14 +560,20 @@ impl AppState {
                     if gen != self.preflight_gen {
                         continue;
                     }
-                    self.access = match result {
-                        Ok(ok) => AccessCheck::Accessible {
-                            message: ok.message,
-                            file_count: ok.file_count,
-                            bytes_total: ok.bytes_total,
-                        },
-                        Err(msg) => AccessCheck::Inaccessible(msg),
-                    };
+                    match result {
+                        Ok(plan) => {
+                            self.access = AccessCheck::Accessible {
+                                message: format!("OK — mode {:?}", plan.mode),
+                                file_count: plan.file_count,
+                                bytes_total: plan.bytes_total,
+                            };
+                            self.cached_plan = Some(plan);
+                        }
+                        Err(msg) => {
+                            self.cached_plan = None;
+                            self.access = AccessCheck::Inaccessible(msg);
+                        }
+                    }
                 }
                 BgMsg::Progress(p) => {
                     self.progress = p;
@@ -657,6 +658,7 @@ impl AppState {
 
     fn invalidate_preflight(&mut self) {
         self.preflight_gen = self.preflight_gen.wrapping_add(1);
+        self.cached_plan = None;
         if self.transferring || !self.selections_complete() {
             self.access = AccessCheck::Untested;
             return;
@@ -683,6 +685,7 @@ impl AppState {
         self.listing = false;
         self.list_loaded_for = None;
         self.preflight_gen = self.preflight_gen.wrapping_add(1);
+        self.cached_plan = None;
         self.access = AccessCheck::Untested;
         self.progress = Progress::default();
         self.status_line.clear();
@@ -734,6 +737,7 @@ impl AppState {
             return;
         }
         self.preflight_gen = self.preflight_gen.wrapping_add(1);
+        self.cached_plan = None;
         self.spawn_preflight();
     }
 
@@ -750,22 +754,12 @@ impl AppState {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let (source, dest, source_base, dest_base, relatives) = inputs;
-            let result = (|| {
-                let plan = ft_exec::plan_transfer(
-                    source,
-                    dest,
-                    source_base,
-                    dest_base,
-                    relatives,
-                )
-                .map_err(|e| format!("{e:#}"))?;
-                ft_exec::preflight_start(&plan).map_err(|e| format!("{e:#}"))?;
-                Ok(PreflightOk {
-                    message: format!("OK — mode {:?}", plan.mode),
-                    file_count: plan.file_count,
-                    bytes_total: plan.bytes_total,
+            let result = ft_exec::plan_transfer(source, dest, source_base, dest_base, relatives)
+                .and_then(|plan| {
+                    ft_exec::preflight_start(&plan)?;
+                    Ok(plan)
                 })
-            })();
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(BgMsg::Preflight { gen, result });
         });
     }
@@ -801,35 +795,20 @@ impl AppState {
         ))
     }
 
-    fn build_plan(&self) -> Result<TransferPlan, String> {
-        let (source, dest, source_base, dest_base, relatives) = self.preflight_inputs()?;
-        ft_exec::plan_transfer(source, dest, source_base, dest_base, relatives)
-            .map_err(|e| format!("{e:#}"))
-    }
-
     pub fn start_transfer(&mut self) {
         if !matches!(self.access, AccessCheck::Accessible { .. }) || self.transferring {
             return;
         }
-        let plan = match self.build_plan() {
-            Ok(p) => p,
-            Err(e) => {
-                self.status_line = e;
-                return;
-            }
-        };
-        if let Err(e) = ft_exec::preflight_start(&plan) {
-            self.access = AccessCheck::Inaccessible(format!("{e:#}"));
-            self.status_line = format!("Cannot start: {e:#}");
+        let Some(plan) = self.cached_plan.clone() else {
+            self.status_line = "Access check has not finished".into();
             return;
-        }
+        };
 
         self.transferring = true;
         self.cancel.store(false, Ordering::SeqCst);
         self.progress = Progress {
             bytes_total: plan.bytes_total,
             files_total: (plan.file_count > 0).then_some(plan.file_count),
-            indeterminate: plan.bytes_total.is_none(),
             ..Default::default()
         };
         self.status_line = "Transferring…".into();

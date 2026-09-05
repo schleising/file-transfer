@@ -5,7 +5,6 @@ pub enum Glyph {
     Transfer,
     Computer,
     Folder,
-    FolderOpen,
     Document,
     Check,
     Close,
@@ -17,15 +16,10 @@ pub enum Glyph {
 }
 
 #[component]
-pub fn Icon(kind: Glyph, #[props(default)] class: String) -> Element {
-    let class = if class.is_empty() {
-        "glyph".to_string()
-    } else {
-        format!("glyph {class}")
-    };
+pub fn Icon(kind: Glyph) -> Element {
     rsx! {
         svg {
-            class,
+            class: "glyph",
             view_box: "0 0 24 24",
             fill: "none",
             stroke: "currentColor",
@@ -47,7 +41,7 @@ fn paths(kind: Glyph) -> Element {
             rect { x: "4", y: "5", width: "16", height: "11", rx: "2" }
             path { d: "M9 20h6M12 16v4" }
         },
-        Glyph::Folder | Glyph::FolderOpen => rsx! {
+        Glyph::Folder => rsx! {
             path { d: "M3.5 8.5A2 2 0 0 1 5.5 6.5h3.2l1.6 1.7h8.2a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" }
         },
         Glyph::Document => rsx! {

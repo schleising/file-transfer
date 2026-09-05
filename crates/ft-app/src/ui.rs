@@ -997,7 +997,7 @@ fn LocationPickerSheet() -> Element {
                     button {
                         class: "btn",
                         onclick: move |_| state.write().picker_browse(),
-                        Icon { kind: Glyph::FolderOpen }
+                        Icon { kind: Glyph::Folder }
                         "Browse…"
                     }
                     button { class: "btn btn-primary", onclick: move |_| state.write().picker_use_path(), "Use Path" }

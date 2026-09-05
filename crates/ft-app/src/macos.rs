@@ -73,9 +73,8 @@ pub fn attach_menubar() {
                 dioxus::desktop::window().window.set_visible(false);
                 return;
             }
-            let too_soon =
-                now_ms().saturating_sub(PROCESS_START_MS.load(Ordering::SeqCst))
-                    < STARTUP_REOPEN_GRACE_MS;
+            let too_soon = now_ms().saturating_sub(PROCESS_START_MS.load(Ordering::SeqCst))
+                < STARTUP_REOPEN_GRACE_MS;
             if too_soon && STARTUP_REOPEN.load(Ordering::SeqCst) {
                 dioxus::desktop::window().window.set_visible(false);
                 return;
@@ -130,7 +129,7 @@ fn apply_open_at_login(item: &CheckMenuItem, event_id: &MenuId) {
     item.set_checked(login_item_enabled());
 }
 
-pub fn hide_window_at_launch() -> bool {
+fn hide_window_at_launch() -> bool {
     if std::env::args().any(|a| a == "--hidden") {
         return true;
     }
@@ -274,7 +273,10 @@ fn set_login_item(enabled: bool) -> bool {
 }
 
 fn agent_plist_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join("Library/LaunchAgents").join(format!("{AGENT_LABEL}.plist")))
+    dirs::home_dir().map(|h| {
+        h.join("Library/LaunchAgents")
+            .join(format!("{AGENT_LABEL}.plist"))
+    })
 }
 
 fn app_bundle_path() -> Option<PathBuf> {
@@ -422,4 +424,3 @@ fn stamp(px: &mut [u8], s: u32, x: i32, y: i32) {
         }
     }
 }
-

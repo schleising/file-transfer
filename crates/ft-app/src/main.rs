@@ -8,9 +8,8 @@ mod window_frame;
 
 fn main() {
     let window = {
-        let mut builder = window_frame::apply(
-            dioxus::desktop::WindowBuilder::new().with_title("File Transfer"),
-        );
+        let mut builder =
+            window_frame::apply(dioxus::desktop::WindowBuilder::new().with_title("File Transfer"));
         #[cfg(target_os = "macos")]
         {
             use dioxus::desktop::tao::platform::macos::WindowBuilderExtMacOS;
@@ -40,7 +39,9 @@ fn main() {
             .with_tray_icon_show_window_on_click(false);
     }
 
-    dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(ui::app);
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(cfg)
+        .launch(ui::app);
 }
 
 fn native_menu() -> dioxus::desktop::muda::Menu {

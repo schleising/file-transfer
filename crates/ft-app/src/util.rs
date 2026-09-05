@@ -78,7 +78,7 @@ pub fn progress_fraction(progress: &ft_exec::Progress, transferring: bool) -> f3
     }
 }
 
-    pub fn progress_detail(progress: &ft_exec::Progress, transferring: bool) -> String {
+pub fn progress_detail(progress: &ft_exec::Progress, transferring: bool) -> String {
     let frac = progress_fraction(progress, transferring);
     let mut extras = Vec::new();
     match progress.files_total {
@@ -102,7 +102,7 @@ pub fn progress_fraction(progress: &ft_exec::Progress, transferring: bool) -> f3
         extras.push(format_rate(rate));
     }
     if let Some(eta) = progress.eta_secs {
-        if transferring && (eta != 0 || transferring) {
+        if transferring {
             extras.push(format!("ETA {}", format_eta(eta)));
         }
     }
