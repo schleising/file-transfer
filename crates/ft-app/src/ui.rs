@@ -388,12 +388,59 @@ fn FilesStep() -> Element {
     }
 }
 
+const TILE_DRAG_WIDTH: f64 = 118.0;
+const TILE_DRAG_HEIGHT: f64 = 108.0;
+const TILE_FLIP_COVERAGE: f64 = 0.6;
+const TILE_SWAP_LOCK: f64 = TILE_DRAG_WIDTH * 0.45;
+
+const TILE_FLIP_JS: &str = r#"
+(() => {
+  const last = window.__ftTileLast || {};
+  const next = {};
+  document.querySelectorAll("[data-tile-id]").forEach((el) => {
+    if (el.classList.contains("is-dragging")) return;
+    const vis = el.querySelector(":scope > .tile-visual") || el;
+    const r = el.getBoundingClientRect();
+    next[el.dataset.tileId] = { x: r.left, y: r.top };
+    const prev = last[el.dataset.tileId];
+    if (!prev) {
+      vis.style.transition = "";
+      vis.style.transform = "";
+      return;
+    }
+    const dx = prev.x - r.left;
+    const dy = prev.y - r.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+      vis.style.transition = "";
+      vis.style.transform = "";
+      return;
+    }
+    if (vis.getAnimations) vis.getAnimations().forEach((a) => a.cancel());
+    vis.style.transition = "none";
+    vis.style.transform = "translate(" + dx + "px, " + dy + "px)";
+    void vis.offsetWidth;
+    vis.style.transition = "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)";
+    vis.style.transform = "translate(0px, 0px)";
+  });
+  window.__ftTileLast = next;
+  return true;
+})()
+"#;
+
 #[component]
 fn LocationTiles(side: Side) -> Element {
     let mut state = use_context::<Signal<AppState>>();
     let mut dragging = use_signal(|| None::<(Uuid, Uuid)>);
-    let mut drop_over = use_signal(|| None::<Uuid>);
-    let mut tail_over = use_signal(|| None::<Uuid>);
+    let mut preview = use_signal(|| None::<(Uuid, Vec<Uuid>)>);
+    let mut suppress_click = use_signal(|| false);
+    let mut grab_at = use_signal(|| (TILE_DRAG_WIDTH / 2.0, TILE_DRAG_HEIGHT / 2.0));
+    let mut swap_lock = use_signal(|| None::<(Uuid, f64)>);
+    use_effect(move || {
+        let _ = preview();
+        spawn(async move {
+            let _ = dioxus::document::eval(TILE_FLIP_JS).await;
+        });
+    });
     let groups = state.read().location_groups();
     let selected_id = match side {
         Side::Source => state.read().source_location,
@@ -415,6 +462,16 @@ fn LocationTiles(side: Side) -> Element {
             {
                 let computer_id = computer.id;
                 let color = host_color(computer.id);
+                let loc_ids: Vec<Uuid> = locs.iter().map(|l| l.id).collect();
+                let visual = tile_preview_ids(preview(), computer_id, &loc_ids);
+                let slot = dragging().and_then(|(id, cid)| {
+                    (cid == computer_id)
+                        .then(|| visual.iter().position(|existing| *existing == id))
+                        .flatten()
+                });
+                let add_order = visual.len() as i32;
+                let loc_ids_add = loc_ids.clone();
+                let loc_ids_tail = loc_ids.clone();
                 rsx! {
                     div {
                         class: "host-block",
@@ -425,12 +482,38 @@ fn LocationTiles(side: Side) -> Element {
                             span { "{computer.name}" }
                             div { class: "host-rule" }
                         }
-                        div { class: "tiles",
+                        div {
+                            class: "tiles",
+                            ondragover: move |evt| {
+                                if dragging().is_some_and(|(_, cid)| cid == computer_id) {
+                                    evt.prevent_default();
+                                    evt.data_transfer().set_drop_effect("move");
+                                }
+                            },
+                            ondrop: move |evt| {
+                                evt.prevent_default();
+                                commit_tile_drag(&mut state, dragging(), preview());
+                                dragging.set(None);
+                                preview.set(None);
+                                swap_lock.set(None);
+                            },
+                            if let Some(slot) = slot {
+                                div {
+                                    class: "tile-slot",
+                                    key: "slot-{computer_id}",
+                                    "data-tile-id": "slot-{computer_id}",
+                                    style: "order: {slot as i32}",
+                                }
+                            }
                             for loc in locs {
                                 {
                                     let loc_id = loc.id;
                                     let name = folder_display_name(&loc.path, &loc.name);
                                     let selected = selected_id == Some(loc_id);
+                                    let order = visual
+                                        .iter()
+                                        .position(|id| *id == loc_id)
+                                        .unwrap_or(0) as i32;
                                     let class = {
                                         let mut c = String::from("tile");
                                         if selected {
@@ -442,60 +525,101 @@ fn LocationTiles(side: Side) -> Element {
                                         if dragging().is_some_and(|(id, _)| id == loc_id) {
                                             c.push_str(" is-dragging");
                                         }
-                                        if drop_over() == Some(loc_id) {
-                                            c.push_str(" is-drop");
-                                        }
                                         c
                                     };
+                                    let ids_start = loc_ids.clone();
+                                    let ids_hover = loc_ids.clone();
                                     rsx! {
                                         div {
                                             class,
                                             key: "{loc_id}",
+                                            "data-tile-id": "{loc_id}",
+                                            style: "order: {order}",
                                             draggable: if locked { "false" } else { "true" },
-                                            onclick: move |_| state.write().select_location(loc_id, side),
-                                            ondragstart: move |_| dragging.set(Some((loc_id, computer_id))),
+                                            onclick: move |_| {
+                                                if suppress_click() {
+                                                    suppress_click.set(false);
+                                                    return;
+                                                }
+                                                state.write().select_location(loc_id, side);
+                                            },
+                                            ondragstart: move |evt| {
+                                                let dt = evt.data_transfer();
+                                                let _ = dt.set_data("text/plain", &loc_id.to_string());
+                                                dt.set_effect_allowed("move");
+                                                let at = evt.element_coordinates();
+                                                grab_at.set((at.x, at.y));
+                                                swap_lock.set(None);
+                                                let _ = dioxus::document::eval(
+                                                    "window.__ftTileLast = {}; true",
+                                                );
+                                                suppress_click.set(true);
+                                                dragging.set(Some((loc_id, computer_id)));
+                                                preview.set(Some((computer_id, ids_start.clone())));
+                                            },
                                             ondragend: move |_| {
                                                 dragging.set(None);
-                                                drop_over.set(None);
-                                                tail_over.set(None);
+                                                preview.set(None);
+                                                swap_lock.set(None);
+                                                let mut suppress_click = suppress_click;
+                                                spawn(async move {
+                                                    futures_timer::Delay::new(
+                                                        std::time::Duration::from_millis(80),
+                                                    )
+                                                    .await;
+                                                    suppress_click.set(false);
+                                                });
                                             },
                                             ondragover: move |evt| {
-                                                evt.prevent_default();
-                                                drop_over.set(Some(loc_id));
-                                            },
-                                            ondragleave: move |_| {
-                                                if drop_over() == Some(loc_id) {
-                                                    drop_over.set(None);
+                                                let Some((drag_id, drag_cid)) = dragging() else {
+                                                    return;
+                                                };
+                                                if drag_cid != computer_id || drag_id == loc_id {
+                                                    return;
                                                 }
-                                            },
-                                            ondrop: move |evt| {
                                                 evt.prevent_default();
-                                                if let Some((drag_id, drag_cid)) = dragging() {
-                                                    if drag_cid == computer_id {
-                                                        state.write().reorder_location_tiles(
-                                                            computer_id,
-                                                            drag_id,
-                                                            Some(loc_id),
-                                                        );
+                                                evt.data_transfer().set_drop_effect("move");
+                                                if tile_x_coverage(
+                                                    evt.element_coordinates().x,
+                                                    grab_at().0,
+                                                ) < TILE_FLIP_COVERAGE
+                                                {
+                                                    return;
+                                                }
+                                                let base = tile_preview_ids(
+                                                    preview(),
+                                                    computer_id,
+                                                    &ids_hover,
+                                                );
+                                                let next = take_target_slot(&base, drag_id, loc_id);
+                                                let client_x = evt.client_coordinates().x;
+                                                if let Some((frozen, origin_x)) = swap_lock() {
+                                                    if frozen == loc_id
+                                                        && (client_x - origin_x).abs() < TILE_SWAP_LOCK
+                                                    {
+                                                        return;
                                                     }
                                                 }
-                                                dragging.set(None);
-                                                drop_over.set(None);
+                                                if set_tile_preview(&mut preview, computer_id, next) {
+                                                    swap_lock.set(Some((loc_id, client_x)));
+                                                }
                                             },
-                                            button {
-                                                class: "tile-delete",
-                                                r#type: "button",
-                                                disabled: locked,
-                                                onclick: move |evt| {
-                                                    evt.stop_propagation();
-                                                    state.write().delete_location_tile(loc_id);
-                                                },
-                                                Icon { kind: Glyph::Close }
+                                            div { class: "tile-visual",
+                                                button {
+                                                    class: "tile-delete",
+                                                    r#type: "button",
+                                                    disabled: locked,
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        state.write().delete_location_tile(loc_id);
+                                                    },
+                                                    Icon { kind: Glyph::Close }
+                                                }
+                                                div { class: "tile-icon",
+                                                    Icon { kind: Glyph::Folder }
+                                                }
+                                                div { class: "tile-name", title: "{loc.path.display()}", "{name}" }
                                             }
-                                            div { class: "tile-icon",
-                                                Icon { kind: Glyph::Folder }
-                                            }
-                                            div { class: "tile-name", title: "{loc.path.display()}", "{name}" }
                                         }
                                     }
                                 }
@@ -503,47 +627,44 @@ fn LocationTiles(side: Side) -> Element {
                             button {
                                 class: "tile tile-add",
                                 r#type: "button",
+                                "data-tile-id": "add-{computer_id}",
+                                style: "order: {add_order}",
                                 disabled: locked,
-                                onclick: move |_| state.write().browse_on_host(computer_id, side),
-                                div { class: "tile-icon",
-                                    Icon { kind: Glyph::Plus }
-                                }
-                                div { class: "tile-name", "Add folder" }
-                            }
-                            {
-                                let tail_class = if tail_over() == Some(computer_id) {
-                                    "drop-tail is-drop"
-                                } else {
-                                    "drop-tail"
-                                };
-                                rsx! {
-                                    div {
-                                        class: tail_class,
-                                        ondragover: move |evt| {
-                                            evt.prevent_default();
-                                            tail_over.set(Some(computer_id));
-                                        },
-                                        ondragleave: move |_| {
-                                            if tail_over() == Some(computer_id) {
-                                                tail_over.set(None);
-                                            }
-                                        },
-                                        ondrop: move |evt| {
-                                            evt.prevent_default();
-                                            if let Some((drag_id, drag_cid)) = dragging() {
-                                                if drag_cid == computer_id {
-                                                    state.write().reorder_location_tiles(
-                                                        computer_id,
-                                                        drag_id,
-                                                        None,
-                                                    );
-                                                }
-                                            }
-                                            dragging.set(None);
-                                            tail_over.set(None);
-                                        },
+                                onclick: move |_| {
+                                    if suppress_click() {
+                                        suppress_click.set(false);
+                                        return;
                                     }
+                                    state.write().browse_on_host(computer_id, side);
+                                },
+                                ondragover: move |evt| {
+                                    hover_move_to_end(
+                                        evt,
+                                        computer_id,
+                                        &loc_ids_add,
+                                        dragging(),
+                                        &mut preview,
+                                    );
+                                },
+                                div { class: "tile-visual",
+                                    div { class: "tile-icon",
+                                        Icon { kind: Glyph::Plus }
+                                    }
+                                    div { class: "tile-name", "Add folder" }
                                 }
+                            }
+                            div {
+                                class: "drop-tail",
+                                style: "order: {add_order + 1}",
+                                ondragover: move |evt| {
+                                    hover_move_to_end(
+                                        evt,
+                                        computer_id,
+                                        &loc_ids_tail,
+                                        dragging(),
+                                        &mut preview,
+                                    );
+                                },
                             }
                         }
                     }
@@ -551,6 +672,105 @@ fn LocationTiles(side: Side) -> Element {
             }
         }
     }
+}
+
+fn tile_preview_ids(
+    preview: Option<(Uuid, Vec<Uuid>)>,
+    computer_id: Uuid,
+    fallback: &[Uuid],
+) -> Vec<Uuid> {
+    match preview {
+        Some((cid, ids)) if cid == computer_id => ids,
+        _ => fallback.to_vec(),
+    }
+}
+
+fn set_tile_preview(
+    preview: &mut Signal<Option<(Uuid, Vec<Uuid>)>>,
+    computer_id: Uuid,
+    next: Vec<Uuid>,
+) -> bool {
+    if preview()
+        .as_ref()
+        .is_some_and(|(cid, ids)| *cid == computer_id && *ids == next)
+    {
+        return false;
+    }
+    preview.set(Some((computer_id, next)));
+    true
+}
+
+fn hover_move_to_end(
+    evt: dioxus::html::DragEvent,
+    computer_id: Uuid,
+    fallback: &[Uuid],
+    dragging: Option<(Uuid, Uuid)>,
+    preview: &mut Signal<Option<(Uuid, Vec<Uuid>)>>,
+) {
+    let Some((drag_id, drag_cid)) = dragging else {
+        return;
+    };
+    if drag_cid != computer_id {
+        return;
+    }
+    evt.prevent_default();
+    evt.data_transfer().set_drop_effect("move");
+    let base = tile_preview_ids(preview(), computer_id, fallback);
+    let next = move_tile_to_end(&base, drag_id);
+    set_tile_preview(preview, computer_id, next);
+}
+
+fn tile_x_coverage(elem_x: f64, grab_x: f64) -> f64 {
+    let ghost_left = elem_x - grab_x;
+    let overlap = (ghost_left + TILE_DRAG_WIDTH).min(TILE_DRAG_WIDTH) - ghost_left.max(0.0);
+    if overlap <= 0.0 {
+        0.0
+    } else {
+        overlap / TILE_DRAG_WIDTH
+    }
+}
+
+fn take_target_slot(ids: &[Uuid], dragged: Uuid, target: Uuid) -> Vec<Uuid> {
+    let Some(drag_idx) = ids.iter().position(|id| *id == dragged) else {
+        return ids.to_vec();
+    };
+    let Some(target_idx) = ids.iter().position(|id| *id == target) else {
+        return ids.to_vec();
+    };
+    if drag_idx == target_idx {
+        return ids.to_vec();
+    }
+    let mut next: Vec<Uuid> = ids.iter().copied().filter(|id| *id != dragged).collect();
+    let Some(idx) = next.iter().position(|id| *id == target) else {
+        next.push(dragged);
+        return next;
+    };
+    next.insert(if drag_idx < target_idx { idx + 1 } else { idx }, dragged);
+    next
+}
+
+fn move_tile_to_end(ids: &[Uuid], dragged: Uuid) -> Vec<Uuid> {
+    let mut next: Vec<Uuid> = ids.iter().copied().filter(|id| *id != dragged).collect();
+    next.push(dragged);
+    next
+}
+
+fn commit_tile_drag(
+    state: &mut Signal<AppState>,
+    dragging: Option<(Uuid, Uuid)>,
+    preview: Option<(Uuid, Vec<Uuid>)>,
+) {
+    let Some((drag_id, drag_cid)) = dragging else {
+        return;
+    };
+    let Some((cid, ids)) = preview else {
+        return;
+    };
+    if cid != drag_cid {
+        return;
+    }
+    let before = ids.iter().skip_while(|id| **id != drag_id).nth(1).copied();
+    state.write().reorder_location_tiles(cid, drag_id, before);
 }
 
 #[component]

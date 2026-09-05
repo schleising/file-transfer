@@ -489,7 +489,8 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-right: 4px;
+  padding: 6px 10px 10px 8px;
+  margin: 0 -10px 0 -8px;
 }
 
 .page-header {
@@ -559,23 +560,34 @@ textarea {
 .tiles {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   gap: 10px;
+  position: relative;
 }
 
 .tile {
   width: 118px;
   height: 108px;
+  position: relative;
+  cursor: default;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+
+.tile-visual {
+  position: absolute;
+  inset: 0;
   border-radius: 12px;
   border: 1.5px solid var(--tile-border);
   background: var(--tile);
-  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 8px;
   padding: 14px 10px 12px;
-  cursor: default;
   box-shadow: var(--shadow);
 }
 
@@ -586,11 +598,11 @@ button.tile {
   color: inherit;
 }
 
-.tile:hover {
+.tile:hover .tile-visual {
   border-color: color-mix(in srgb, var(--host) 55%, var(--tile-border));
 }
 
-.tile.is-selected {
+.tile.is-selected .tile-visual {
   background: color-mix(in srgb, var(--host) 12%, var(--tile));
   border-color: var(--host);
 }
@@ -604,8 +616,8 @@ button.tile {
   opacity: 0.45;
 }
 
-.tile.is-locked:not(.is-selected):hover,
-.tile-add:disabled:hover {
+.tile.is-locked:not(.is-selected):hover .tile-visual,
+.tile-add:disabled:hover .tile-visual {
   border-color: var(--tile-border);
 }
 
@@ -626,13 +638,25 @@ button.tile {
   background: transparent;
 }
 
-.tile.is-drop {
-  outline: 2px solid var(--host);
-  outline-offset: 2px;
+.tile.is-dragging {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
-.tile.is-dragging {
-  opacity: 0.45;
+.tile-slot {
+  width: 118px;
+  height: 108px;
+  border-radius: 12px;
+  box-sizing: border-box;
+  border: 1.5px dashed color-mix(in srgb, var(--host) 50%, var(--tile-border));
+  background: color-mix(in srgb, var(--host) 10%, transparent);
+  pointer-events: none;
+}
+
+.tiles:has(.is-dragging) .tile:not(.is-dragging) .tile-visual,
+.tiles:has(.is-dragging) .tile-slot {
+  will-change: transform;
 }
 
 .tile-icon {
@@ -641,9 +665,7 @@ button.tile {
   color: var(--host);
 }
 
-.tile-add {
-  appearance: none;
-  font: inherit;
+.tile-add .tile-visual {
   border-style: dashed;
   background: transparent;
   box-shadow: none;
@@ -654,7 +676,7 @@ button.tile {
   color: var(--secondary);
 }
 
-.tile-add:hover {
+.tile-add:hover .tile-visual {
   border-color: color-mix(in srgb, var(--host) 55%, var(--tile-border));
   color: var(--host);
 }
@@ -710,13 +732,10 @@ button.tile {
 }
 
 .drop-tail {
-  width: 18px;
+  flex: 1 1 24px;
+  min-width: 24px;
   min-height: 108px;
   border-radius: 8px;
-}
-
-.drop-tail.is-drop {
-  background: color-mix(in srgb, var(--host) 18%, transparent);
 }
 
 .caption {
@@ -850,7 +869,7 @@ button.tile {
 .btn:focus-visible,
 .nav-item:focus-visible,
 .chip:focus-visible,
-.tile:focus-visible,
+.tile:focus-visible .tile-visual,
 .file-row:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px var(--focus);
