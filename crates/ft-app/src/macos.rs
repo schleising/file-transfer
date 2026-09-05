@@ -1,25 +1,39 @@
 //! macOS menubar extra, login-item, and launch visibility.
 
 use dioxus::desktop::tao::event::{Event, WindowEvent};
-use dioxus::desktop::trayicon::menu::{CheckMenuItem, Menu, PredefinedMenuItem};
+use dioxus::desktop::trayicon::menu::{CheckMenuItem, Menu, MenuId, PredefinedMenuItem};
 use dioxus::desktop::trayicon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use dioxus::desktop::{
-    use_tray_icon_event_handler, use_tray_menu_event_handler, use_wry_event_handler,
+    use_muda_event_handler, use_tray_icon_event_handler, use_tray_menu_event_handler,
+    use_wry_event_handler,
 };
 use dioxus::prelude::*;
-use objc2::runtime::{AnyClass, AnyObject, Bool};
 use objc2::msg_send;
+use objc2::runtime::{AnyClass, AnyObject, Bool};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const AGENT_LABEL: &str = "local.file-transfer";
+const INSTALLED_APP: &str = "/Applications/File Transfer.app";
+
+unsafe extern "C" {
+    fn getuid() -> u32;
+}
 
 const FOCUS_GRACE_MS: u64 = 400;
 
 static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(false);
 static LAST_UNFOCUS_MS: AtomicU64 = AtomicU64::new(0);
 static STARTUP_VISIBILITY_LOCKED: AtomicBool = AtomicBool::new(false);
+static STARTUP_REOPEN: AtomicBool = AtomicBool::new(false);
+static PROCESS_START_MS: AtomicU64 = AtomicU64::new(0);
+
+const STARTUP_REOPEN_GRACE_MS: u64 = 2500;
 
 #[derive(Clone)]
 struct TrayHandles {
@@ -27,6 +41,7 @@ struct TrayHandles {
 }
 
 pub fn attach_menubar() {
+    let _ = PROCESS_START_MS.compare_exchange(0, now_ms(), Ordering::SeqCst, Ordering::SeqCst);
     let open_at_login = use_hook(|| {
         let open_at_login = CheckMenuItem::new("Open at Login", true, login_item_enabled(), None);
         let menu = Menu::new();
@@ -53,7 +68,18 @@ pub fn attach_menubar() {
             ..
         } => note_focus(*focused),
         Event::Reopen { .. } => {
-            STARTUP_VISIBILITY_LOCKED.store(true, Ordering::SeqCst);
+            if !STARTUP_VISIBILITY_LOCKED.load(Ordering::SeqCst) {
+                STARTUP_REOPEN.store(true, Ordering::SeqCst);
+                dioxus::desktop::window().window.set_visible(false);
+                return;
+            }
+            let too_soon =
+                now_ms().saturating_sub(PROCESS_START_MS.load(Ordering::SeqCst))
+                    < STARTUP_REOPEN_GRACE_MS;
+            if too_soon && STARTUP_REOPEN.load(Ordering::SeqCst) {
+                dioxus::desktop::window().window.set_visible(false);
+                return;
+            }
             show_window();
         }
         _ => {}
@@ -70,22 +96,22 @@ pub fn attach_menubar() {
         }
     });
 
+    let login_tray = open_at_login.clone();
     use_tray_menu_event_handler(move |event| {
-        if event.id == *open_at_login.id() {
-            let enable = !login_item_enabled();
-            let _ = set_login_item(enable);
-            open_at_login.set_checked(login_item_enabled());
-        }
+        apply_open_at_login(&login_tray, &event.id);
+    });
+    let login_muda = open_at_login.clone();
+    use_muda_event_handler(move |event| {
+        apply_open_at_login(&login_muda, &event.id);
     });
 
     use_future(|| async {
-        let hide = hide_window_at_launch();
         for _ in 0..16 {
             futures_timer::Delay::new(std::time::Duration::from_millis(40)).await;
             if STARTUP_VISIBILITY_LOCKED.load(Ordering::SeqCst) {
                 break;
             }
-            if hide {
+            if STARTUP_REOPEN.load(Ordering::SeqCst) || hide_window_at_launch() {
                 dioxus::desktop::window().window.set_visible(false);
             } else {
                 show_window();
@@ -95,6 +121,15 @@ pub fn attach_menubar() {
     });
 }
 
+fn apply_open_at_login(item: &CheckMenuItem, event_id: &MenuId) {
+    if event_id != item.id() {
+        return;
+    }
+    let enable = !login_item_enabled();
+    let _ = set_login_item(enable);
+    item.set_checked(login_item_enabled());
+}
+
 pub fn hide_window_at_launch() -> bool {
     if std::env::args().any(|a| a == "--hidden") {
         return true;
@@ -102,7 +137,7 @@ pub fn hide_window_at_launch() -> bool {
     if launched_as_login_item_event() {
         return true;
     }
-    running_from_app_bundle() && login_item_enabled() && !app_is_active()
+    running_from_app_bundle() && !app_is_active()
 }
 
 fn toggle_window() {
@@ -206,39 +241,131 @@ fn activate_app() {
     }
 }
 
-const SM_ENABLED: isize = 1;
-
 fn login_item_enabled() -> bool {
-    unsafe {
-        let Some(cls) = AnyClass::get(c"SMAppService") else {
-            return false;
-        };
-        let svc: *mut AnyObject = msg_send![cls, mainAppService];
-        if svc.is_null() {
-            return false;
-        }
-        let status: isize = msg_send![svc, status];
-        status == SM_ENABLED
-    }
+    agent_plist_path().is_some_and(|p| p.is_file())
 }
 
 fn set_login_item(enabled: bool) -> bool {
-    unsafe {
-        let Some(cls) = AnyClass::get(c"SMAppService") else {
-            return false;
-        };
-        let svc: *mut AnyObject = msg_send![cls, mainAppService];
-        if svc.is_null() {
+    let Some(plist) = agent_plist_path() else {
+        return false;
+    };
+    bootout_agent();
+    if !enabled {
+        let _ = std::fs::remove_file(&plist);
+        return !plist.exists();
+    }
+    let Some(app) = app_bundle_path() else {
+        return false;
+    };
+    if let Some(dir) = plist.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
             return false;
         }
-        let mut err: *mut AnyObject = std::ptr::null_mut();
-        let ok: Bool = if enabled {
-            msg_send![svc, registerAndReturnError: &mut err]
-        } else {
-            msg_send![svc, unregisterAndReturnError: &mut err]
-        };
-        ok.as_bool()
     }
+    if std::fs::write(&plist, launch_agent_plist(&app)).is_err() {
+        return false;
+    }
+    if !bootstrap_agent(&plist) {
+        let _ = std::fs::remove_file(&plist);
+        return false;
+    }
+    true
+}
+
+fn agent_plist_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join("Library/LaunchAgents").join(format!("{AGENT_LABEL}.plist")))
+}
+
+fn app_bundle_path() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(app) = bundle_from_exe(&exe) {
+            return Some(app);
+        }
+    }
+    let installed = PathBuf::from(INSTALLED_APP);
+    installed.is_dir().then_some(installed)
+}
+
+fn bundle_from_exe(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    if macos.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let app = macos.parent()?.parent()?;
+    (app.extension()?.to_str()? == "app").then(|| app.to_path_buf())
+}
+
+fn launch_agent_plist(app: &Path) -> String {
+    let app = xml_escape(&app.to_string_lossy());
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{AGENT_LABEL}</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/open</string>
+    <string>-g</string>
+    <string>-a</string>
+    <string>{app}</string>
+    <string>--args</string>
+    <string>--hidden</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn session_uid() -> u32 {
+    unsafe { getuid() }
+}
+
+fn agent_target() -> String {
+    format!("gui/{}/{AGENT_LABEL}", session_uid())
+}
+
+fn bootout_agent() {
+    let _ = Command::new("/bin/launchctl")
+        .args(["bootout", &agent_target()])
+        .output();
+}
+
+fn bootstrap_agent(plist: &Path) -> bool {
+    let domain = format!("gui/{}", session_uid());
+    let path = plist.to_string_lossy();
+    let _ = Command::new("/bin/launchctl")
+        .args(["enable", &agent_target()])
+        .status();
+    let boot = Command::new("/bin/launchctl")
+        .args(["bootstrap", &domain, path.as_ref()])
+        .output();
+    if let Ok(out) = boot {
+        if out.status.success() {
+            return true;
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("already loaded") || err.contains("service already") {
+            return true;
+        }
+    }
+    Command::new("/bin/launchctl")
+        .args(["load", "-w", path.as_ref()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn menubar_icon() -> Icon {
@@ -295,5 +422,3 @@ fn stamp(px: &mut [u8], s: u32, x: i32, y: i32) {
     }
 }
 
-#[link(name = "ServiceManagement", kind = "framework")]
-extern "C" {}
