@@ -73,6 +73,7 @@ impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path.as_ref())
             .with_context(|| format!("open db {}", path.as_ref().display()))?;
+        conn.busy_timeout(std::time::Duration::from_millis(2000))?;
         let store = Self { conn };
         store.migrate()?;
         store.ensure_local_computer()?;
@@ -105,9 +106,33 @@ impl Store {
                 updated_at TEXT NOT NULL
             );
             DROP TABLE IF EXISTS jobs;
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
             "#,
         )?;
         self.migrate_locations_sort_order()?;
+        Ok(())
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
         Ok(())
     }
 
@@ -415,5 +440,21 @@ mod tests {
         };
         store.upsert_location(&loc).unwrap();
         assert_eq!(store.locations_for(remote.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn settings_roundtrip() {
+        let store = Store::open(":memory:").unwrap();
+        assert_eq!(store.setting("window.frame").unwrap(), None);
+        store.set_setting("window.frame", "100 80 1280 840").unwrap();
+        assert_eq!(
+            store.setting("window.frame").unwrap().as_deref(),
+            Some("100 80 1280 840")
+        );
+        store.set_setting("window.frame", "10 20 1300 860").unwrap();
+        assert_eq!(
+            store.setting("window.frame").unwrap().as_deref(),
+            Some("10 20 1300 860")
+        );
     }
 }

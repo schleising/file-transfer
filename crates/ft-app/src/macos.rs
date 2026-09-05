@@ -148,6 +148,7 @@ fn toggle_window() {
         return;
     }
     if desktop.window.is_focused() || was_front_recently() {
+        crate::window_frame::save();
         desktop.window.set_visible(false);
     } else {
         show_window();
