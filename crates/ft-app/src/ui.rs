@@ -1,5 +1,5 @@
 use crate::icons::{Glyph, Icon};
-use crate::state::{AppState, BrowseTarget, NavTab, Side};
+use crate::state::{AccessCheck, AppState, BrowseTarget, NavTab, Side};
 use crate::util::{
     folder_display_name, format_bytes, host_color, progress_detail, progress_fraction, status_kind,
 };
@@ -13,7 +13,11 @@ pub fn app() -> Element {
 
     use_future(move || async move {
         loop {
-            let ms = if state.read().transferring { 100 } else { 250 };
+            let busy = {
+                let s = state.read();
+                s.transferring || matches!(s.access, AccessCheck::Testing)
+            };
+            let ms = if busy { 100 } else { 250 };
             futures_timer::Delay::new(std::time::Duration::from_millis(ms)).await;
             state.write().poll_bg();
         }
@@ -67,17 +71,14 @@ fn Sidebar() -> Element {
     let mut state = use_context::<Signal<AppState>>();
     let tab = state.read().tab;
     let transferring = state.read().transferring;
-    let can_check = state.read().check_access_ready();
     let source_label = state.read().compact_location_label(Side::Source);
     let dest_label = state.read().compact_location_label(Side::Dest);
     let source_title = state.read().compact_location_title(Side::Source);
     let dest_title = state.read().compact_location_title(Side::Dest);
-    let preflight = state.read().preflight_ok.clone();
-    let (status_kind, status_title) = match &preflight {
-        None => ("idle", "Untested".to_string()),
-        Some(Ok(msg)) => ("ok", format!("Success — {msg}")),
-        Some(Err(msg)) => ("err", format!("Fail — {msg}")),
-    };
+    let access = state.read().access.clone();
+    let status_kind = access.kind();
+    let status_label = access.label();
+    let status_detail = access.detail().to_string();
     rsx! {
         aside { class: "sidebar",
             div { class: "sidebar-traffic" }
@@ -120,21 +121,21 @@ fn Sidebar() -> Element {
                     span { class: "access-k", "Destination" }
                     span { class: "access-v", title: "{dest_title}", "{dest_label}" }
                 }
-                div { class: "access-actions",
-                    span { class: "access-status {status_kind}", title: "{status_title}",
-                        if status_kind == "ok" {
-                            Icon { kind: Glyph::Check }
-                        } else if status_kind == "err" {
-                            Icon { kind: Glyph::Close }
-                        } else {
-                            Icon { kind: Glyph::Circle }
+                div { class: "access-status-block", title: "{status_detail}",
+                    div { class: "access-status-caption", "Access status" }
+                    div { class: "access-status-line",
+                        span { class: "access-status {status_kind}",
+                            if matches!(access, AccessCheck::Untested) {
+                                Icon { kind: Glyph::Help }
+                            } else if matches!(access, AccessCheck::Testing) {
+                                span { class: "spinner" }
+                            } else if matches!(access, AccessCheck::Accessible(_)) {
+                                Icon { kind: Glyph::Check }
+                            } else {
+                                Icon { kind: Glyph::Close }
+                            }
                         }
-                    }
-                    button {
-                        class: "btn",
-                        disabled: !can_check,
-                        onclick: move |_| state.write().run_preflight(),
-                        "Check Access"
+                        span { class: "access-status-text {status_kind}", "{status_label}" }
                     }
                 }
             }
@@ -176,6 +177,7 @@ fn PageHeader() -> Element {
     let mut state = use_context::<Signal<AppState>>();
     let tab = state.read().tab;
     let action = matches!(tab, NavTab::Source | NavTab::Destination);
+    let locked = state.read().selections_locked();
     rsx! {
         header { class: "page-header",
             div {
@@ -185,6 +187,7 @@ fn PageHeader() -> Element {
             if action {
                 button {
                     class: "btn btn-primary",
+                    disabled: locked,
                     onclick: move |_| {
                         let side = if tab == NavTab::Source { Side::Source } else { Side::Dest };
                         state.write().open_location_picker(side);
@@ -238,6 +241,7 @@ fn FilesStep() -> Element {
     let entries = state.read().entries.clone();
     let selected = state.read().selected.clone();
     let selected_n = selected.len();
+    let locked = state.read().selections_locked();
 
     if !source_ready {
         return rsx! {
@@ -252,12 +256,12 @@ fn FilesStep() -> Element {
         if let Some(label) = label {
             p { class: "caption", "{label}" }
         }
-        div { class: "file-card",
+        div { class: if locked { "file-card is-locked" } else { "file-card" },
             div { class: "file-toolbar",
                 span { class: "file-count", "{selected_n} selected" }
-                button { class: "btn", onclick: move |_| state.write().select_all_files(), "Select All" }
-                button { class: "btn", onclick: move |_| state.write().clear_file_selection(), "Clear" }
-                button { class: "btn", onclick: move |_| state.write().refresh_file_list(),
+                button { class: "btn", disabled: locked, onclick: move |_| state.write().select_all_files(), "Select All" }
+                button { class: "btn", disabled: locked, onclick: move |_| state.write().clear_file_selection(), "Clear" }
+                button { class: "btn", disabled: locked, onclick: move |_| state.write().refresh_file_list(),
                     Icon { kind: Glyph::Refresh }
                     "Refresh"
                 }
@@ -282,7 +286,13 @@ fn FilesStep() -> Element {
                         {
                             let name = entry.name.clone();
                             let on = selected.contains(&name);
-                            let class = if on { "file-row is-on" } else { "file-row" };
+                            let class = if on {
+                                "file-row is-on"
+                            } else if locked {
+                                "file-row is-locked"
+                            } else {
+                                "file-row"
+                            };
                             let glyph = if entry.is_dir { Glyph::Folder } else { Glyph::Document };
                             let size = if entry.is_dir {
                                 String::new()
@@ -301,6 +311,7 @@ fn FilesStep() -> Element {
                                     input {
                                         r#type: "checkbox",
                                         checked: on,
+                                        disabled: locked,
                                         onchange: move |_| state.write().toggle_file(&name),
                                     }
                                     Icon { kind: glyph }
@@ -327,6 +338,7 @@ fn LocationTiles(side: Side) -> Element {
         Side::Source => state.read().source_location,
         Side::Dest => state.read().dest_location,
     };
+    let locked = state.read().selections_locked();
 
     if groups.is_empty() {
         return rsx! {
@@ -363,6 +375,9 @@ fn LocationTiles(side: Side) -> Element {
                                         if selected {
                                             c.push_str(" is-selected");
                                         }
+                                        if locked {
+                                            c.push_str(" is-locked");
+                                        }
                                         if dragging().is_some_and(|(id, _)| id == loc_id) {
                                             c.push_str(" is-dragging");
                                         }
@@ -375,7 +390,7 @@ fn LocationTiles(side: Side) -> Element {
                                         div {
                                             class,
                                             key: "{loc_id}",
-                                            draggable: "true",
+                                            draggable: if locked { "false" } else { "true" },
                                             onclick: move |_| state.write().select_location(loc_id, side),
                                             ondragstart: move |_| dragging.set(Some((loc_id, computer_id))),
                                             ondragend: move |_| {
@@ -409,6 +424,7 @@ fn LocationTiles(side: Side) -> Element {
                                             button {
                                                 class: "tile-delete",
                                                 r#type: "button",
+                                                disabled: locked,
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();
                                                     state.write().delete_location_tile(loc_id);
@@ -426,6 +442,7 @@ fn LocationTiles(side: Side) -> Element {
                             button {
                                 class: "tile tile-add",
                                 r#type: "button",
+                                disabled: locked,
                                 onclick: move |_| state.write().browse_on_host(computer_id, side),
                                 div { class: "tile-icon",
                                     Icon { kind: Glyph::Plus }

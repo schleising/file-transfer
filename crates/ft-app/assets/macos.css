@@ -277,25 +277,37 @@ textarea {
   white-space: nowrap;
 }
 
-.access-actions {
+.access-status-block {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--separator);
+  min-height: 44px;
+}
+
+.access-status-caption {
+  font-size: 11px;
+  color: var(--tertiary);
+  margin-bottom: 6px;
+}
+
+.access-status-line {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
-  min-height: 28px;
-}
-
-.access-actions .btn {
-  flex: 1;
+  min-height: 22px;
 }
 
 .access-status {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   display: grid;
   place-items: center;
   flex-shrink: 0;
   color: var(--tertiary);
+}
+
+.access-status.testing {
+  color: var(--accent);
 }
 
 .access-status.ok {
@@ -307,8 +319,31 @@ textarea {
 }
 
 .access-status svg {
+  width: 18px;
+  height: 18px;
+}
+
+.access-status .spinner {
   width: 14px;
   height: 14px;
+}
+
+.access-status-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tertiary);
+}
+
+.access-status-text.testing {
+  color: var(--accent);
+}
+
+.access-status-text.ok {
+  color: var(--ok);
+}
+
+.access-status-text.err {
+  color: var(--err);
 }
 
 .sidebar-reset {
@@ -440,6 +475,37 @@ button.tile {
 .tile.is-selected {
   background: color-mix(in srgb, var(--host) 12%, var(--tile));
   border-color: var(--host);
+}
+
+.tile.is-locked {
+  pointer-events: none;
+}
+
+.tile.is-locked:not(.is-selected),
+.tile-add:disabled {
+  opacity: 0.45;
+}
+
+.tile.is-locked:not(.is-selected):hover,
+.tile-add:disabled:hover {
+  border-color: var(--tile-border);
+}
+
+.tile-add:disabled:hover,
+.tile-add:disabled:hover .tile-icon {
+  color: var(--secondary);
+}
+
+.file-card.is-locked .file-row {
+  pointer-events: none;
+}
+
+.file-card.is-locked .file-row:not(.is-on) {
+  opacity: 0.45;
+}
+
+.file-row.is-locked:hover {
+  background: transparent;
 }
 
 .tile.is-drop {

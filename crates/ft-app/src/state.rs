@@ -19,7 +19,10 @@ pub enum BgMsg {
         path: PathBuf,
         result: Result<Vec<DirEntry>, String>,
     },
-    Preflight(Result<String, String>),
+    Preflight {
+        gen: u64,
+        result: Result<String, String>,
+    },
     Progress(Progress),
     TransferDone(Result<(u64, bool), String>),
 }
@@ -34,6 +37,41 @@ pub enum BrowseTarget {
 pub enum Side {
     Source,
     Dest,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum AccessCheck {
+    Untested,
+    Testing,
+    Accessible(String),
+    Inaccessible(String),
+}
+
+impl AccessCheck {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Untested => "idle",
+            Self::Testing => "testing",
+            Self::Accessible(_) => "ok",
+            Self::Inaccessible(_) => "err",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Untested => "Untested",
+            Self::Testing => "Testing",
+            Self::Accessible(_) => "Accessible",
+            Self::Inaccessible(_) => "Inaccessible",
+        }
+    }
+
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Untested | Self::Testing => self.label(),
+            Self::Accessible(msg) | Self::Inaccessible(msg) => msg,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -113,7 +151,8 @@ pub struct AppState {
     pub listing: bool,
     list_loaded_for: Option<Uuid>,
 
-    pub preflight_ok: Option<Result<String, String>>,
+    pub access: AccessCheck,
+    preflight_gen: u64,
     pub progress: Progress,
     pub transferring: bool,
     pub status_line: String,
@@ -151,7 +190,8 @@ impl AppState {
             list_error: None,
             listing: false,
             list_loaded_for: None,
-            preflight_ok: None,
+            access: AccessCheck::Untested,
+            preflight_gen: 0,
             progress: Progress::default(),
             transferring: false,
             status_line: String::new(),
@@ -403,6 +443,9 @@ impl AppState {
     }
 
     pub fn browser_select(&mut self) {
+        if self.selections_locked() {
+            return;
+        }
         if let Some(browser) = self.folder_browser.take() {
             self.apply_browsed_folder(browser.computer_id, browser.target, browser.current_path);
         }
@@ -453,8 +496,14 @@ impl AppState {
                         }
                     }
                 }
-                BgMsg::Preflight(r) => {
-                    self.preflight_ok = Some(r);
+                BgMsg::Preflight { gen, result } => {
+                    if gen != self.preflight_gen {
+                        continue;
+                    }
+                    self.access = match result {
+                        Ok(msg) => AccessCheck::Accessible(msg),
+                        Err(msg) => AccessCheck::Inaccessible(msg),
+                    };
                 }
                 BgMsg::Progress(p) => {
                     self.progress = p;
@@ -499,6 +548,9 @@ impl AppState {
     }
 
     pub fn refresh_file_list(&mut self) {
+        if self.selections_locked() {
+            return;
+        }
         self.list_loaded_for = None;
         self.start_list();
     }
@@ -511,18 +563,22 @@ impl AppState {
         !self.selected.is_empty()
     }
 
-    pub fn transfer_ready(&self) -> bool {
-        self.source_ready()
-            && self.files_ready()
-            && self.dest_location.is_some()
-            && !self.transferring
+    pub fn selections_complete(&self) -> bool {
+        self.source_ready() && self.files_ready() && self.dest_location.is_some()
     }
 
-    pub fn check_access_ready(&self) -> bool {
-        self.transfer_ready()
+    pub fn transfer_ready(&self) -> bool {
+        matches!(self.access, AccessCheck::Accessible(_)) && !self.transferring
+    }
+
+    pub fn selections_locked(&self) -> bool {
+        matches!(self.access, AccessCheck::Testing) || self.transferring
     }
 
     pub fn browse_on_host(&mut self, computer_id: Uuid, side: Side) {
+        if self.selections_locked() {
+            return;
+        }
         let target = match side {
             Side::Source => BrowseTarget::Source,
             Side::Dest => BrowseTarget::Dest,
@@ -531,7 +587,12 @@ impl AppState {
     }
 
     fn invalidate_preflight(&mut self) {
-        self.preflight_ok = None;
+        self.preflight_gen = self.preflight_gen.wrapping_add(1);
+        if self.transferring || !self.selections_complete() {
+            self.access = AccessCheck::Untested;
+            return;
+        }
+        self.spawn_preflight();
     }
 
     pub fn reset_transfer(&mut self) {
@@ -552,7 +613,8 @@ impl AppState {
         self.list_error = None;
         self.listing = false;
         self.list_loaded_for = None;
-        self.preflight_ok = None;
+        self.preflight_gen = self.preflight_gen.wrapping_add(1);
+        self.access = AccessCheck::Untested;
         self.progress = Progress::default();
         self.status_line.clear();
         self.cancel.store(false, Ordering::SeqCst);
@@ -598,22 +660,46 @@ impl AppState {
         }
     }
 
-    pub fn run_preflight(&mut self) {
-        match self.build_plan() {
-            Ok(plan) => {
-                let tx = self.tx.clone();
-                std::thread::spawn(move || {
-                    let res = ft_exec::preflight_start(&plan)
-                        .map(|_| format!("OK — mode {:?}", plan.mode))
-                        .map_err(|e| format!("{e:#}"));
-                    let _ = tx.send(BgMsg::Preflight(res));
-                });
-            }
-            Err(e) => self.preflight_ok = Some(Err(e)),
+    fn maybe_run_preflight(&mut self) {
+        if self.transferring || !self.selections_complete() {
+            return;
         }
+        self.preflight_gen = self.preflight_gen.wrapping_add(1);
+        self.spawn_preflight();
     }
 
-    fn build_plan(&self) -> Result<TransferPlan, String> {
+    fn spawn_preflight(&mut self) {
+        let inputs = match self.preflight_inputs() {
+            Ok(inputs) => inputs,
+            Err(e) => {
+                self.access = AccessCheck::Inaccessible(e);
+                return;
+            }
+        };
+        self.access = AccessCheck::Testing;
+        let gen = self.preflight_gen;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let (source, dest, source_base, dest_base, relatives) = inputs;
+            let result = (|| {
+                let plan = ft_exec::plan_transfer(
+                    source,
+                    dest,
+                    source_base,
+                    dest_base,
+                    relatives,
+                )
+                .map_err(|e| format!("{e:#}"))?;
+                ft_exec::preflight_start(&plan).map_err(|e| format!("{e:#}"))?;
+                Ok(format!("OK — mode {:?}", plan.mode))
+            })();
+            let _ = tx.send(BgMsg::Preflight { gen, result });
+        });
+    }
+
+    fn preflight_inputs(
+        &self,
+    ) -> Result<(HostRef, HostRef, PathBuf, PathBuf, Vec<String>), String> {
         let sc = self
             .source_computer
             .and_then(|id| self.computer(id).cloned())
@@ -633,18 +719,25 @@ impl AppState {
         if self.selected.is_empty() {
             return Err("Select at least one file or folder".into());
         }
-        let relatives: Vec<String> = self.selected.iter().cloned().collect();
-        ft_exec::plan_transfer(
+        Ok((
             Self::host_ref(&sc),
             Self::host_ref(&dc),
             sl.path,
             dl.path,
-            relatives,
-        )
-        .map_err(|e| format!("{e:#}"))
+            self.selected.iter().cloned().collect(),
+        ))
+    }
+
+    fn build_plan(&self) -> Result<TransferPlan, String> {
+        let (source, dest, source_base, dest_base, relatives) = self.preflight_inputs()?;
+        ft_exec::plan_transfer(source, dest, source_base, dest_base, relatives)
+            .map_err(|e| format!("{e:#}"))
     }
 
     pub fn start_transfer(&mut self) {
+        if !matches!(self.access, AccessCheck::Accessible(_)) || self.transferring {
+            return;
+        }
         let plan = match self.build_plan() {
             Ok(p) => p,
             Err(e) => {
@@ -653,7 +746,7 @@ impl AppState {
             }
         };
         if let Err(e) = ft_exec::preflight_start(&plan) {
-            self.preflight_ok = Some(Err(format!("{e:#}")));
+            self.access = AccessCheck::Inaccessible(format!("{e:#}"));
             self.status_line = format!("Cannot start: {e:#}");
             return;
         }
@@ -703,9 +796,15 @@ impl AppState {
         } else {
             format!("Transfer complete ({})", format_bytes(bytes))
         };
+        if matches!(self.access, AccessCheck::Untested) {
+            self.maybe_run_preflight();
+        }
     }
 
     pub fn select_all_files(&mut self) {
+        if self.selections_locked() {
+            return;
+        }
         for e in &self.entries {
             self.selected.insert(e.name.clone());
         }
@@ -713,11 +812,17 @@ impl AppState {
     }
 
     pub fn clear_file_selection(&mut self) {
+        if self.selections_locked() {
+            return;
+        }
         self.selected.clear();
         self.invalidate_preflight();
     }
 
     pub fn toggle_file(&mut self, name: &str) {
+        if self.selections_locked() {
+            return;
+        }
         if self.selected.contains(name) {
             self.selected.remove(name);
         } else {
@@ -727,6 +832,9 @@ impl AppState {
     }
 
     pub fn delete_location_tile(&mut self, id: Uuid) {
+        if self.selections_locked() {
+            return;
+        }
         if self.store.delete_location(id).is_err() {
             return;
         }
@@ -745,6 +853,9 @@ impl AppState {
         dragged_id: Uuid,
         before_id: Option<Uuid>,
     ) {
+        if self.selections_locked() {
+            return;
+        }
         if dragged_id == before_id.unwrap_or(Uuid::nil()) {
             return;
         }
@@ -767,6 +878,9 @@ impl AppState {
     }
 
     pub fn open_location_picker(&mut self, side: Side) {
+        if self.selections_locked() {
+            return;
+        }
         let computer_id = match side {
             Side::Source => self.source_computer,
             Side::Dest => self.dest_computer,
@@ -843,6 +957,9 @@ impl AppState {
     }
 
     pub fn picker_browse(&mut self) {
+        if self.selections_locked() {
+            return;
+        }
         let Some(picker) = &self.location_picker else {
             return;
         };
@@ -860,6 +977,9 @@ impl AppState {
     }
 
     pub fn picker_use_path(&mut self) {
+        if self.selections_locked() {
+            return;
+        }
         let Some(picker) = &self.location_picker else {
             return;
         };
@@ -908,6 +1028,9 @@ impl AppState {
     }
 
     pub fn select_location(&mut self, id: Uuid, side: Side) {
+        if self.selections_locked() {
+            return;
+        }
         self.apply_location_selection(Some(id), side);
         if side == Side::Source {
             self.ensure_files_listed();
