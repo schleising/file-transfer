@@ -1,0 +1,24 @@
+---
+description: Bump app and local crate versions with semver on every change
+alwaysApply: true
+---
+
+# Semantic versions
+
+After any change that ships in this repo, bump versions in the **same turn** before finishing. Do not leave the previous version on changed crates.
+
+## What to bump
+
+- **App:** `[workspace.package].version` in the root `Cargo.toml`. All local crates inherit it via `version.workspace = true` unless a crate has its own `version = "x.y.z"`.
+- **Independent crate:** if only some crates should move, set `version = "x.y.z"` in that crate’s `Cargo.toml` (drop `version.workspace = true`) and bump just those crates plus the **app** whenever `ft-app` still consumes the change.
+- Run a cargo command afterward so `Cargo.lock` matches. `scripts/install-app.sh` reads the `ft-app` version into `Info.plist` — do not hardcode it there.
+
+## Which number
+
+Use [semver](https://semver.org): `MAJOR.MINOR.PATCH`.
+
+- **PATCH** (`1.0.0` → `1.0.1`): bug fixes, styling, docs, cleanup, no new capability
+- **MINOR** (`1.0.1` → `1.1.0`): new backward-compatible behavior or UI
+- **MAJOR** (`1.1.0` → `2.0.0`): breaking behavior, removed features, incompatible data/store changes
+
+Bump once per unit of work (the highest tier that applies). The sidebar brand and crate hover list come from each crate’s `CARGO_PKG_VERSION`.

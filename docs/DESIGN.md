@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use v1). This document describes the **as-built** system in this repo.
+**Status:** Implemented (personal-use **1.0.0**). This document describes the **as-built** system in this repo. App and local crate versions live in Cargo.toml (`workspace.package.version`, inherited unless a crate sets its own); bump with semver on shipped changes.
 
 ## 1. Overview
 

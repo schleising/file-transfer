@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "ft-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "ft-exec"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "ft-mdns"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "flume",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "ft-store"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
