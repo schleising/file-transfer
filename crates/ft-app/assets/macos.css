@@ -402,12 +402,6 @@ textarea {
   min-height: 44px;
 }
 
-.access-status-caption {
-  font-size: 11px;
-  color: var(--tertiary);
-  margin-bottom: 6px;
-}
-
 .access-status-line {
   display: flex;
   align-items: center;

@@ -126,7 +126,7 @@ fn Sidebar() -> Element {
                 }
             }
             div { class: "sidebar-panel",
-                div { class: "sidebar-panel-title", "Access" }
+                div { class: "sidebar-panel-title", "Summary" }
                 div { class: "access-row",
                     span { class: "access-k", "Source Host" }
                     span { class: "access-v", title: "{source_host}", "{source_host}" }
@@ -183,7 +183,7 @@ fn Sidebar() -> Element {
                     span { class: "access-v", title: "{dest_folder_title}", "{dest_folder}" }
                 }
                 div { class: "access-status-block", title: "{status_detail}",
-                    div { class: "access-status-caption", "Access status" }
+                    div { class: "sidebar-panel-title", "Access status" }
                     div { class: "access-status-line",
                         span { class: "access-status {status_kind}",
                             if matches!(access, AccessCheck::Untested) {
@@ -202,7 +202,7 @@ fn Sidebar() -> Element {
             }
             div { class: "sidebar-spacer" }
             button {
-                class: "btn sidebar-reset",
+                class: "btn btn-primary sidebar-reset",
                 disabled: transferring,
                 onclick: move |_| state.write().reset_transfer(),
                 "Reset"
