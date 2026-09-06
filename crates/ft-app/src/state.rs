@@ -20,6 +20,11 @@ pub enum BgMsg {
         path: PathBuf,
         result: Result<Vec<DirEntry>, String>,
     },
+    Mkdir {
+        parent: PathBuf,
+        name: String,
+        result: Result<(), String>,
+    },
     Preflight {
         gen: u64,
         result: Result<TransferPlan, String>,
@@ -203,6 +208,7 @@ pub struct FolderBrowser {
     pub entries: Vec<DirEntry>,
     pub loading: bool,
     pub error: Option<String>,
+    pub new_folder_name: String,
 }
 
 pub struct LocationPicker {
@@ -511,6 +517,7 @@ impl AppState {
             entries: vec![],
             loading: true,
             error: None,
+            new_folder_name: String::new(),
         });
         self.refresh_folder_browser();
     }
@@ -598,6 +605,61 @@ impl AppState {
         self.refresh_folder_browser();
     }
 
+    pub fn browser_create_folder(&mut self) {
+        let Some(browser) = &self.folder_browser else {
+            return;
+        };
+        if browser.target != BrowseTarget::Dest || browser.loading {
+            return;
+        }
+        let name = browser.new_folder_name.trim().to_string();
+        if let Err(e) = valid_new_folder_name(&name) {
+            if let Some(browser) = &mut self.folder_browser {
+                browser.error = Some(e);
+            }
+            return;
+        }
+        if browser.entries.iter().any(|e| e.name == name) {
+            if let Some(browser) = &mut self.folder_browser {
+                browser.error = Some("A folder with that name already exists".into());
+            }
+            return;
+        }
+        let mut path = browser.current_path.clone();
+        let Some(c) = self.computer(browser.computer_id).cloned() else {
+            return;
+        };
+        self.note_user_activity();
+        if let Some(browser) = &mut self.folder_browser {
+            browser.loading = true;
+            browser.error = None;
+        }
+        let bg = self.bg.clone();
+        std::thread::spawn(move || {
+            let host = AppState::host_ref(&c);
+            if path == Path::new("~") {
+                path = match ft_exec::remote_home(&host) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        bg.send(BgMsg::Mkdir {
+                            parent: PathBuf::from("~"),
+                            name,
+                            result: Err(format!("{e:#}")),
+                        });
+                        return;
+                    }
+                };
+            }
+            let dest = path.join(&name);
+            let result = ft_exec::mkdir(&host, &dest).map_err(|e| format!("{e:#}"));
+            bg.send(BgMsg::Mkdir {
+                parent: path,
+                name,
+                result,
+            });
+        });
+    }
+
     pub fn browser_select(&mut self) {
         if self.selections_locked() {
             return;
@@ -648,6 +710,30 @@ impl AppState {
                             }
                             Err(e) => {
                                 browser.entries.clear();
+                                browser.error = Some(e);
+                            }
+                        }
+                    }
+                }
+                BgMsg::Mkdir {
+                    parent,
+                    name,
+                    result,
+                } => {
+                    if self.folder_browser.is_none() {
+                        continue;
+                    }
+                    match result {
+                        Ok(()) => {
+                            if let Some(browser) = &mut self.folder_browser {
+                                browser.new_folder_name.clear();
+                                browser.current_path = parent;
+                            }
+                            self.browser_enter(name);
+                        }
+                        Err(e) => {
+                            if let Some(browser) = &mut self.folder_browser {
+                                browser.loading = false;
                                 browser.error = Some(e);
                             }
                         }
@@ -1224,4 +1310,20 @@ impl AppState {
             self.ensure_files_listed();
         }
     }
+}
+
+fn valid_new_folder_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Enter a folder name".into());
+    }
+    if name == "." || name == ".." {
+        return Err("Invalid folder name".into());
+    }
+    if name.starts_with('.') {
+        return Err("Hidden folder names are not used here".into());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err("Folder name cannot contain a path".into());
+    }
+    Ok(())
 }

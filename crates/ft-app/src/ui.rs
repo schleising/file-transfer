@@ -1113,6 +1113,17 @@ fn FolderBrowserSheet() -> Element {
         .map(|b| b.entries.clone())
         .unwrap_or_default();
     let empty = entries.is_empty() && !loading;
+    let is_dest = state
+        .read()
+        .folder_browser
+        .as_ref()
+        .is_some_and(|b| b.target == BrowseTarget::Dest);
+    let new_folder_name = state
+        .read()
+        .folder_browser
+        .as_ref()
+        .map(|b| b.new_folder_name.clone())
+        .unwrap_or_default();
 
     rsx! {
         div {
@@ -1161,6 +1172,33 @@ fn FolderBrowserSheet() -> Element {
                     }
                     if loading {
                         div { class: "spinner" }
+                    }
+                }
+                if is_dest {
+                    div { class: "path-row", style: "margin-top: 10px;",
+                        input {
+                            r#type: "text",
+                            placeholder: "New folder name",
+                            value: "{new_folder_name}",
+                            disabled: loading,
+                            oninput: move |e| {
+                                if let Some(b) = state.write().folder_browser.as_mut() {
+                                    b.new_folder_name = e.value();
+                                }
+                            },
+                            onkeydown: move |e| {
+                                if e.key() == Key::Enter {
+                                    state.write().browser_create_folder();
+                                }
+                            },
+                        }
+                        button {
+                            class: "btn",
+                            disabled: loading,
+                            onclick: move |_| state.write().browser_create_folder(),
+                            Icon { kind: Glyph::Plus }
+                            "New Folder"
+                        }
                     }
                 }
                 if let Some(err) = error {

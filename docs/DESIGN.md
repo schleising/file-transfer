@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.2.0**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
+**Status:** Implemented (personal-use **1.3.0**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
 ## 1. Overview
 
@@ -150,11 +150,11 @@ Selections are locked while preflight is running or a transfer is in progress.
 
 1. **Source** — location tiles grouped by host. Click a folder tile to select it. Drag tiles to reorder within a host (persisted `sort_order`). Tile **×** deletes that saved location. **Add folder** on a host opens the in-app browser. **Add Location** opens the host/path sheet.
 2. **Files** — lists the selected source folder (dotfiles hidden). Multi-select files and/or folders; Select All / Clear / Refresh. Continue requires at least one selection.
-3. **Destination** — same tile UI as Source, for the destination folder.
+3. **Destination** — same tile UI as Source, for the destination folder. Browsing a destination folder can **create a new subfolder**.
 
 ### Adding a location
 
-**Add Location** sheet: pick a saved host chip, optionally **Add Host** from Bonjour or **Add host manually**, then type an absolute path (**Use Path**) or **Browse…**. The same in-app folder browser is used for **This Mac** and remotes (list dirs, Up / Home / Go, Select this folder). New paths are upserted as locations (`kind` is always `either`).
+**Add Location** sheet: pick a saved host chip, optionally **Add Host** from Bonjour or **Add host manually**, then type an absolute path (**Use Path**) or **Browse…**. The same in-app folder browser is used for **This Mac** and remotes (list dirs, Up / Home / Go, Select this folder). On **destination** browse only, **New Folder** creates a directory in the current path (local `mkdir` or remote `mkdir` over SSH), then opens it. New paths are upserted as locations (`kind` is always `either`).
 
 There is no native `rfd` folder dialog.
 
@@ -352,6 +352,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Local ↔ remote ↔ remote→remote (push/pull) | Done |
 | Bonjour `_ssh._tcp` + save from Add Location | Done |
 | In-app folder browse (local and remote) | Done |
+| Destination browse: New Folder | Done |
 | Location tiles, drag reorder, delete | Done |
 | Automatic access/preflight; Transfer gated on Accessible | Done |
 | Progress2 parse + dual-stream drain + `--inplace` + `--outbuf=N` | Done |
@@ -388,7 +389,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | GUI | **Dioxus desktop 0.8** (macOS-styled WKWebView) |
 | Navigation | **Source → Files → Destination** wizard; no Computers / Locations / History tabs |
 | Locations | **Tiles per host**; drag to reorder; Add Location sheet for hosts + paths |
-| Folder pick | **In-app browser** for both This Mac and remotes (not `rfd`) |
+| Folder pick | **In-app browser** for both This Mac and remotes (not `rfd`); dest browse can create a folder |
 | Access | **Automatic preflight** caches the plan; Transfer enabled only when Accessible |
 | Window | Default **1280×840**; persist logical size + position in `settings` |
 | Close / login | **Hide to menu-bar extra**; Open at Login via LaunchAgent `--hidden` |

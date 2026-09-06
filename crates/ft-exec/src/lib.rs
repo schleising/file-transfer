@@ -228,6 +228,27 @@ pub fn list_dir(host: &HostRef, path: &Path) -> Result<Vec<DirEntry>> {
     list_dir_remote(host, path)
 }
 
+/// Create a single directory (parent must already exist). Not `mkdir -p`.
+pub fn mkdir(host: &HostRef, path: &Path) -> Result<()> {
+    if host.is_local {
+        std::fs::create_dir(path).with_context(|| format!("mkdir {}", path.display()))?;
+        return Ok(());
+    }
+    let q = shell_quote(&path.to_string_lossy());
+    let mut cmd = ssh_base(host);
+    cmd.arg(format!("mkdir {q}"));
+    let out = cmd.output().context("ssh mkdir")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let msg = sanitize_error(&err);
+        if msg.is_empty() {
+            bail!("could not create folder");
+        }
+        bail!("{msg}");
+    }
+    Ok(())
+}
+
 fn list_dir_local(path: &Path) -> Result<Vec<DirEntry>> {
     let mut entries = Vec::new();
     for ent in std::fs::read_dir(path).with_context(|| format!("read_dir {}", path.display()))? {
@@ -1364,5 +1385,25 @@ mod tests {
     #[test]
     fn quote() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    fn local_host() -> HostRef {
+        HostRef {
+            is_local: true,
+            ssh_destination: String::new(),
+            ssh_port: None,
+            identity_file: None,
+        }
+    }
+
+    #[test]
+    fn mkdir_local_creates_and_rejects_existing() {
+        let parent = std::env::temp_dir().join(format!("ft-exec-mkdir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let child = parent.join("new folder");
+        mkdir(&local_host(), &child).unwrap();
+        assert!(child.is_dir());
+        assert!(mkdir(&local_host(), &child).is_err());
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
