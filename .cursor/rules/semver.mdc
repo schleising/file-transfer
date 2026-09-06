@@ -1,15 +1,19 @@
 ---
-description: Bump only crates that actually changed; workspace version is the app
+description: Bump only crates whose code changed; never bump for docs-only work
 alwaysApply: true
 ---
 
 # Semantic versions
 
-After any change that ships in this repo, bump versions in the **same turn** before finishing. Do not leave the previous version on **changed** crates.
+After any **code** change that ships in this repo, bump versions in the **same turn** before finishing. Do not leave the previous version on **changed** crates.
+
+## Do not bump
+
+Documentation-only work does **not** change any crate version. That includes `docs/DESIGN.md`, comments, `.cursor/rules`, README, and other prose. Do not raise `[workspace.package].version` or a crate `version =` for those edits, and do not rewrite the design-doc status line’s version unless a code bump happened in the same turn.
 
 ## Which crates
 
-Bump **only crates whose own sources, manifest, or crate-specific docs changed** in this unit of work. Do **not** bump a crate because a sibling moved, because the app moved, or because you raised `[workspace.package].version`.
+Bump **only crates whose own sources or manifest changed** in this unit of work. Do **not** bump a crate because a sibling moved, because the app moved, or because you raised `[workspace.package].version`.
 
 `[workspace.package].version` in the root `Cargo.toml` is the **app** version. `ft-app` keeps `version.workspace = true`.
 
@@ -21,9 +25,9 @@ Run a cargo command afterward so `Cargo.lock` matches. `scripts/install-app.sh` 
 
 ## Which number
 
-Use [semver](https://semver.org): `MAJOR.MINOR.PATCH`. Apply the tier to **each bumped crate independently** (a docs-only app fix is a PATCH on `ft-app` even if a library stayed at an older MINOR).
+Use [semver](https://semver.org): `MAJOR.MINOR.PATCH`. Apply the tier to **each bumped crate independently**.
 
-- **PATCH** (`1.0.0` → `1.0.1`): bug fixes, styling, docs, cleanup, no new capability
+- **PATCH** (`1.0.0` → `1.0.1`): bug fixes, styling, cleanup, no new capability
 - **MINOR** (`1.0.1` → `1.1.0`): new backward-compatible behavior or UI
 - **MAJOR** (`1.1.0` → `2.0.0`): breaking behavior, removed features, incompatible data/store changes
 
