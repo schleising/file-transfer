@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "ft-app"
-version = "1.3.3"
+version = "1.3.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1404,6 +1404,7 @@ dependencies = [
  "ft-mdns",
  "ft-store",
  "futures-timer",
+ "image",
  "objc2",
  "uuid",
 ]

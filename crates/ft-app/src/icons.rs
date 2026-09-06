@@ -2,7 +2,6 @@ use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
-    Transfer,
     Computer,
     Folder,
     Document,
@@ -33,10 +32,6 @@ pub fn Icon(kind: Glyph) -> Element {
 
 fn paths(kind: Glyph) -> Element {
     match kind {
-        Glyph::Transfer => rsx! {
-            path { d: "M7 7h9l-2.2-2.2M16 7l-2.2 2.2" }
-            path { d: "M17 17H8l2.2 2.2M8 17l2.2-2.2" }
-        },
         Glyph::Computer => rsx! {
             rect { x: "4", y: "5", width: "16", height: "11", rx: "2" }
             path { d: "M9 20h6M12 16v4" }

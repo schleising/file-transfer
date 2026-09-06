@@ -9,7 +9,7 @@ members = [
 default-members = ["crates/ft-app"]
 
 [workspace.package]
-version = "1.3.3"
+version = "1.3.5"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Steve"]

@@ -1,3 +1,4 @@
+mod app_icon;
 mod icons;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -45,12 +46,23 @@ fn main() {
 }
 
 fn native_menu() -> dioxus::desktop::muda::Menu {
-    use dioxus::desktop::muda::{Menu, PredefinedMenuItem, Submenu};
+    use dioxus::desktop::muda::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+
+    let about = AboutMetadata {
+        name: Some("File Transfer".into()),
+        version: Some(env!("CARGO_PKG_VERSION").into()),
+        copyright: Some("Copyright © 2026 Steve".into()),
+        credits: Some(
+            "Direct rsync-over-SSH file transfers between computers on your network.".into(),
+        ),
+        icon: app_icon::about_icon(),
+        ..Default::default()
+    };
 
     let menu = Menu::new();
     let app = Submenu::new("File Transfer", true);
     let _ = app.append_items(&[
-        &PredefinedMenuItem::about(Some("About File Transfer"), None),
+        &PredefinedMenuItem::about(Some("About File Transfer"), Some(about)),
         &PredefinedMenuItem::separator(),
         &PredefinedMenuItem::hide(None),
         &PredefinedMenuItem::hide_others(None),

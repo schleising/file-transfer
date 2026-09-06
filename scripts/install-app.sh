@@ -28,7 +28,9 @@ if [[ ! -f "$ICON" ]]; then
 fi
 cp "$ICON" "$RES/AppIcon.icns"
 
-APP_VERSION="$(cargo pkgid -p ft-app)"
+# cargo pkgid is `path+file:///…/ft-app#1.2.3` (or older `…@1.2.3`), not a bare version.
+pkgid="$(cargo pkgid -p ft-app)"
+APP_VERSION="${pkgid##*#}"
 APP_VERSION="${APP_VERSION##*@}"
 
 cat > "$CONTENTS/Info.plist" <<PLIST
@@ -54,6 +56,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>${APP_VERSION}</string>
   <key>CFBundleVersion</key>
   <string>${APP_VERSION}</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © 2026 Steve</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>

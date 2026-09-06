@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.3.3**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
+**Status:** Implemented (personal-use **1.3.5**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
 ## 1. Overview
 
@@ -140,7 +140,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 Sidebar + main stage + persistent footer.
 
-- **Sidebar** — brand with app version (hover for crate versions); Source / Files / Destination steps; **Summary** of the current plan (source host/folder, selected files with hover list, destination host/folder); **Access status** (Untested / Testing / Accessible / Inaccessible); **Last transfer** always visible (**None** / **In progress** / **Complete** / **Failed** / **Cancelled**); **Reset** (clears the plan, Last transfer → None, returns to Source); footer caption “Direct rsync over SSH”.
+- **Sidebar** — brand (app icon, name, version; hover for crate versions); Source / Files / Destination steps; **Summary** of the current plan (source host/folder, selected files with hover list, destination host/folder); **Access status** (Untested / Testing / Accessible / Inaccessible); **Last transfer** always visible (**None** / **In progress** / **Complete** / **Failed** / **Cancelled**); **Reset** (clears the plan, Last transfer → None, returns to Source); footer caption “Direct rsync over SSH”.
 - **Main** — the active step. Source and Destination show **Add Location** in the page header. **Continue** / **Back** sit in the wizard bar.
 - **Footer** — status, rate/ETA, progress bar, **Cancel** while transferring, primary **Transfer** (enabled only when Access status is Accessible).
 
@@ -305,10 +305,11 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 ## 12. GUI details
 
 - Toolkit: **Dioxus desktop 0.8** (WKWebView) with a macOS System Settings–style layout, SF Pro / `-apple-system` type, system accent, light and dark appearance.
-- Layout: **sidebar wizard** (Source, Files, Destination) under a transparent full-size titlebar; brand shows the app version (hover lists `ft-app` / `ft-exec` / `ft-store` / `ft-mdns`); **Summary** + **Access status**; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel, Transfer).
-- Icons: SF Symbol–style inline SVGs for nav, folders, files, network, status.
+- Layout: **sidebar wizard** (Source, Files, Destination) under a transparent full-size titlebar; brand uses `AppIcon.png` plus the app version (hover lists `ft-app` / `ft-exec` / `ft-store` / `ft-mdns`); **Summary** + **Access status**; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel, Transfer).
+- Icons: SF Symbol–style inline SVGs for nav, folders, files, network, status. Sidebar brand and **About File Transfer** use `AppIcon.png` with the same squircle mask macOS applies in the Dock and Launchpad.
 - Locations: Finder-like **tiles** grouped by host; live drag-reorder; Add folder / Add Location.
 - Primary actions: **Continue** / **Reset** / **Transfer** use the system blue accent.
+- App menu **About File Transfer** shows name, marketing version, copyright, credits, and the app icon (not a cargo pkgid). `install-app.sh` writes the same marketing version into `CFBundleShortVersionString` / `CFBundleVersion`.
 - Packaging: minimal `Info.plist` + `AppIcon.icns` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
 - macOS extra: template menu-bar icon (a ring around the arrows while a transfer is running, then the default glyph); left-click toggles the window; menu has Open at Login and Quit. Close button **hides** the window (`WindowCloseBehaviour::WindowHides`).
 - Background UI loop: drain the transfer channel only when a message is pending (a Dioxus `write()` otherwise re-renders the whole app); poll slower while the window is hidden and idle. Bonjour host names in the Add Location sheet refresh about twice a second while that sheet is visible.

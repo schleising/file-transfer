@@ -120,8 +120,10 @@ fn Sidebar() -> Element {
         aside { class: "sidebar",
             div { class: "sidebar-traffic" }
             div { class: "brand",
-                div { class: "brand-mark",
-                    Icon { kind: Glyph::Transfer }
+                img {
+                    class: "brand-mark",
+                    src: "{crate::app_icon::brand_src()}",
+                    alt: "",
                 }
                 div { class: "brand-text",
                     h1 { "File Transfer" }
