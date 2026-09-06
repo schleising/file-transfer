@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 pub enum BgMsg {
@@ -25,6 +26,7 @@ pub enum BgMsg {
     },
     Progress(Progress),
     TransferDone(Result<(u64, bool), String>),
+    AutoReset { gen: u64 },
 }
 
 #[derive(Clone)]
@@ -117,6 +119,41 @@ impl AccessCheck {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub enum LastTransfer {
+    Complete { bytes: u64 },
+    Failed(String),
+    Cancelled,
+}
+
+impl LastTransfer {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Complete { .. } => "ok",
+            Self::Failed(_) => "err",
+            Self::Cancelled => "idle",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Complete { .. } => "Complete",
+            Self::Failed(_) => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Complete { bytes } => {
+                format!("Last transfer complete ({})", format_bytes(*bytes))
+            }
+            Self::Failed(msg) => format!("Last transfer failed: {msg}"),
+            Self::Cancelled => "Last transfer cancelled".into(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NavTab {
     Source,
@@ -200,6 +237,9 @@ pub struct AppState {
     pub progress: Progress,
     pub transferring: bool,
     pub status_line: String,
+    pub last_transfer: Option<LastTransfer>,
+    pub last_transfer_pinned: bool,
+    auto_reset_gen: u64,
     pub cancel: Arc<AtomicBool>,
 
     pub new_name: String,
@@ -239,6 +279,9 @@ impl AppState {
             progress: Progress::default(),
             transferring: false,
             status_line: String::new(),
+            last_transfer: None,
+            last_transfer_pinned: false,
+            auto_reset_gen: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             new_name: String::new(),
             new_ssh: String::new(),
@@ -632,17 +675,25 @@ impl AppState {
                 BgMsg::Progress(p) => {
                     self.progress = p;
                 }
-                BgMsg::TransferDone(r) => match r {
-                    Ok((bytes, cancelled)) => {
-                        if self.transferring {
-                            self.mark_transfer_complete(bytes, cancelled);
+                BgMsg::TransferDone(r) => {
+                    self.transferring = false;
+                    match r {
+                        Ok((bytes, cancelled)) => {
+                            let last = if cancelled {
+                                LastTransfer::Cancelled
+                            } else {
+                                LastTransfer::Complete { bytes }
+                            };
+                            self.remember_job_end(last);
                         }
+                        Err(e) => self.remember_job_end(LastTransfer::Failed(e)),
                     }
-                    Err(e) => {
-                        self.transferring = false;
-                        self.status_line = format!("Transfer failed: {e}");
+                }
+                BgMsg::AutoReset { gen } => {
+                    if gen == self.auto_reset_gen {
+                        self.apply_auto_reset();
                     }
-                },
+                }
             }
         }
     }
@@ -720,10 +771,34 @@ impl AppState {
         self.spawn_preflight();
     }
 
-    pub fn reset_transfer(&mut self) {
-        if self.transferring {
-            return;
-        }
+    fn note_user_activity(&mut self) {
+        self.auto_reset_gen = self.auto_reset_gen.wrapping_add(1);
+    }
+
+    fn schedule_auto_reset(&mut self) {
+        self.auto_reset_gen = self.auto_reset_gen.wrapping_add(1);
+        let gen = self.auto_reset_gen;
+        let bg = self.bg.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(5));
+            bg.send(BgMsg::AutoReset { gen });
+        });
+    }
+
+    fn remember_job_end(&mut self, last: LastTransfer) {
+        self.status_line = match &last {
+            LastTransfer::Complete { bytes } => {
+                format!("Transfer complete ({})", format_bytes(*bytes))
+            }
+            LastTransfer::Failed(e) => format!("Transfer failed: {e}"),
+            LastTransfer::Cancelled => "Cancelled".into(),
+        };
+        self.last_transfer = Some(last);
+        self.last_transfer_pinned = false;
+        self.schedule_auto_reset();
+    }
+
+    fn wipe_plan(&mut self) {
         self.apply_location_selection(None, Side::Source);
         self.apply_location_selection(None, Side::Dest);
         if let Some(local) = self.computers.iter().find(|c| c.is_local) {
@@ -749,6 +824,24 @@ impl AppState {
         self.tab = NavTab::Source;
     }
 
+    fn apply_auto_reset(&mut self) {
+        self.wipe_plan();
+        self.last_transfer_pinned = self.last_transfer.is_some();
+    }
+
+    pub fn reset_transfer(&mut self) {
+        if self.transferring {
+            return;
+        }
+        let clear_last = self.last_transfer_pinned;
+        self.note_user_activity();
+        if clear_last {
+            self.last_transfer = None;
+        }
+        self.wipe_plan();
+        self.last_transfer_pinned = self.last_transfer.is_some();
+    }
+
     pub fn ensure_files_listed(&mut self) {
         let Some(lid) = self.source_location else {
             return;
@@ -760,6 +853,7 @@ impl AppState {
     }
 
     pub fn set_tab(&mut self, tab: NavTab) {
+        self.note_user_activity();
         self.tab = tab;
         if tab == NavTab::Files {
             self.ensure_files_listed();
@@ -774,6 +868,7 @@ impl AppState {
 
     pub fn go_back(&mut self) {
         if let Some(prev) = self.tab.prev() {
+            self.note_user_activity();
             self.tab = prev;
         }
     }
@@ -784,15 +879,6 @@ impl AppState {
             NavTab::Files => self.files_ready(),
             NavTab::Destination => true,
         }
-    }
-
-    fn maybe_run_preflight(&mut self) {
-        if self.transferring || !self.selections_complete() {
-            return;
-        }
-        self.preflight_gen = self.preflight_gen.wrapping_add(1);
-        self.cached_plan = None;
-        self.spawn_preflight();
     }
 
     fn spawn_preflight(&mut self) {
@@ -858,6 +944,9 @@ impl AppState {
             return;
         };
 
+        self.note_user_activity();
+        self.last_transfer = None;
+        self.last_transfer_pinned = false;
         self.transferring = true;
         self.cancel.store(false, Ordering::SeqCst);
         self.progress = Progress {
@@ -893,25 +982,11 @@ impl AppState {
         self.cancel.store(true, Ordering::SeqCst);
     }
 
-    fn mark_transfer_complete(&mut self, bytes: u64, cancelled: bool) {
-        if !self.transferring {
-            return;
-        }
-        self.transferring = false;
-        self.status_line = if cancelled {
-            "Cancelled".into()
-        } else {
-            format!("Transfer complete ({})", format_bytes(bytes))
-        };
-        if matches!(self.access, AccessCheck::Untested) {
-            self.maybe_run_preflight();
-        }
-    }
-
     pub fn select_all_files(&mut self) {
         if self.selections_locked() {
             return;
         }
+        self.note_user_activity();
         for e in &self.entries {
             self.selected.insert(e.name.clone());
         }
@@ -922,6 +997,7 @@ impl AppState {
         if self.selections_locked() {
             return;
         }
+        self.note_user_activity();
         self.selected.clear();
         self.invalidate_preflight();
     }
@@ -930,6 +1006,7 @@ impl AppState {
         if self.selections_locked() {
             return;
         }
+        self.note_user_activity();
         if self.selected.contains(name) {
             self.selected.remove(name);
         } else {
@@ -942,6 +1019,7 @@ impl AppState {
         if self.selections_locked() {
             return;
         }
+        self.note_user_activity();
         if self.store.delete_location(id).is_err() {
             return;
         }
@@ -988,6 +1066,7 @@ impl AppState {
         if self.selections_locked() {
             return;
         }
+        self.note_user_activity();
         let computer_id = match side {
             Side::Source => self.source_computer,
             Side::Dest => self.dest_computer,
@@ -1139,6 +1218,7 @@ impl AppState {
         if self.selections_locked() {
             return;
         }
+        self.note_user_activity();
         self.apply_location_selection(Some(id), side);
         if side == Side::Source {
             self.ensure_files_listed();
