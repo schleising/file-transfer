@@ -1168,7 +1168,7 @@ fn FolderBrowserSheet() -> Element {
                     }
                 }
                 if is_dest {
-                    div { class: "path-row", style: "margin-top: 10px;",
+                    div { class: "path-row browse-new-folder",
                         input {
                             r#type: "text",
                             placeholder: "New folder name",

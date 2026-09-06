@@ -1047,6 +1047,11 @@ input[type="checkbox"]:checked {
   align-items: center;
 }
 
+.browse-new-folder {
+  margin-top: 10px;
+  margin-bottom: 16px;
+}
+
 .path-row input {
   flex: 1;
   min-width: 0;
