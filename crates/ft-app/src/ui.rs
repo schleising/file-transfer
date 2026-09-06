@@ -1,5 +1,5 @@
 use crate::icons::{Glyph, Icon};
-use crate::state::{AccessCheck, AppState, BrowseTarget, LastTransfer, NavTab, Side};
+use crate::state::{AccessCheck, AppState, BrowseTarget, NavTab, Side};
 use crate::util::{
     folder_display_name, format_bytes, host_color, progress_detail, progress_fraction, status_kind,
     APP_VERSION, CRATE_VERSIONS,
@@ -113,11 +113,9 @@ fn Sidebar() -> Element {
     let status_kind = access.kind();
     let status_label = access.label();
     let status_detail = access.detail().to_string();
-    let last_transfer = if state.read().last_transfer_pinned {
-        state.read().last_transfer.clone()
-    } else {
-        None
-    };
+    let last_kind = state.read().last_transfer_kind();
+    let last_label = state.read().last_transfer_label();
+    let last_detail = state.read().last_transfer_detail();
     rsx! {
         aside { class: "sidebar",
             div { class: "sidebar-traffic" }
@@ -238,26 +236,21 @@ fn Sidebar() -> Element {
                         span { class: "access-status-text {status_kind}", "{status_label}" }
                     }
                 }
-                if let Some(last) = last_transfer {
-                    {
-                        let last_kind = last.kind();
-                        let last_label = last.label();
-                        let last_detail = last.detail();
-                        rsx! {
-                            div { class: "access-status-block", title: "{last_detail}",
-                                div { class: "sidebar-panel-title", "Last transfer" }
-                                div { class: "access-status-line",
-                                    span { class: "access-status {last_kind}",
-                                        if matches!(last, LastTransfer::Complete { .. }) {
-                                            Icon { kind: Glyph::Check }
-                                        } else {
-                                            Icon { kind: Glyph::Close }
-                                        }
-                                    }
-                                    span { class: "access-status-text {last_kind}", "{last_label}" }
-                                }
+                div { class: "access-status-block", title: "{last_detail}",
+                    div { class: "sidebar-panel-title", "Last transfer" }
+                    div { class: "access-status-line",
+                        span { class: "access-status {last_kind}",
+                            if transferring {
+                                span { class: "spinner" }
+                            } else if last_kind == "ok" {
+                                Icon { kind: Glyph::Check }
+                            } else if last_kind == "err" || last_label == "Cancelled" {
+                                Icon { kind: Glyph::Close }
+                            } else {
+                                Icon { kind: Glyph::Help }
                             }
                         }
+                        span { class: "access-status-text {last_kind}", "{last_label}" }
                     }
                 }
             }

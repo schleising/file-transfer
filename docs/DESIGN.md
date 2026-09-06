@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.3.0**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
+**Status:** Implemented (personal-use **1.3.1**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
 ## 1. Overview
 
@@ -140,7 +140,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 Sidebar + main stage + persistent footer.
 
-- **Sidebar** — brand with app version (hover for crate versions); Source / Files / Destination steps; **Summary** of the current plan (source host/folder, selected files with hover list, destination host/folder); **Access status** (Untested / Testing / Accessible / Inaccessible); **Last transfer** (Complete / Failed / Cancelled) after a job is reset; **Reset** (clears the plan and returns to Source; a second Reset clears Last transfer); footer caption “Direct rsync over SSH”.
+- **Sidebar** — brand with app version (hover for crate versions); Source / Files / Destination steps; **Summary** of the current plan (source host/folder, selected files with hover list, destination host/folder); **Access status** (Untested / Testing / Accessible / Inaccessible); **Last transfer** always visible (**None** / **In progress** / **Complete** / **Failed** / **Cancelled**); **Reset** (clears the plan, Last transfer → None, returns to Source); footer caption “Direct rsync over SSH”.
 - **Main** — the active step. Source and Destination show **Add Location** in the page header. **Continue** / **Back** sit in the wizard bar.
 - **Footer** — status, rate/ETA, progress bar, **Cancel** while transferring, primary **Transfer** (enabled only when Access status is Accessible).
 
@@ -167,7 +167,7 @@ There is no native `rfd` folder dialog.
 5. **Transfer** reuses the cached preflight plan (no second folder expand) → progress bar with rate and ETA; **Cancel** kills the local ssh/rsync child.
 6. UI shows **Transfer complete** as soon as rsync reports payload done (see §8); SSH teardown continues in the background.
 7. **Five seconds** after the job ends (success, failure, or cancel), the same plan wipe as **Reset** runs unless the user interacts first (tab, selection, Add Location, Transfer, or Reset). Reset during the wait still runs immediately.
-8. After that wipe the footer is **Ready**. The sidebar **Last transfer** line keeps Complete / Failed / Cancelled (session-only, not SQLite). It clears when the next **Transfer** starts, or on a second **Reset**.
+8. After that wipe the footer is **Ready**. Sidebar **Last transfer** stays **Complete** / **Failed** / **Cancelled** (session-only). **Reset** sets Last transfer to **None**.
 
 Selected names appear in the running UI (file list and Summary hover). They are session-only.
 
@@ -378,7 +378,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 - Install from `scripts/install-app.sh` and launch from `/Applications`.
 - Close hides to the extra; Quit from the extra or app menu; Open at Login starts hidden.
 - Window reopen restores last size and position.
-- After a job ends, the plan resets in 5s unless you interact; Last transfer remains in the sidebar until the next Transfer or a second Reset.
+- After a job ends, the plan resets in 5s unless you interact; Last transfer stays Complete/Failed/Cancelled until Reset (None).
 
 ---
 
@@ -393,7 +393,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Access | **Automatic preflight** caches the plan; Transfer enabled only when Accessible |
 | Window | Default **1280×840**; persist logical size + position in `settings` |
 | Close / login | **Hide to menu-bar extra**; Open at Login via LaunchAgent `--hidden` |
-| Post-transfer auto-reset | **5s then Reset** after success, failure, or cancel (**W1**); cancelled by interaction (**T2**); last result in sidebar (**B**) |
+| Post-transfer auto-reset | **5s then plan Reset** after success, failure, or cancel (**W1**); cancelled by interaction (**T2**); persistent sidebar Last transfer (**B**); **Reset** returns Last transfer to None |
 | Remote→remote | Probe both; **prefer push** |
 | Progress | Preflight total + parse **progress2 from stdout** (`\r`); `--outbuf=N`; drain both pipes; rate/ETA; **wait for rsync exit** |
 | DNS-SD | **`_ssh._tcp` only** |

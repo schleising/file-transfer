@@ -244,7 +244,6 @@ pub struct AppState {
     pub transferring: bool,
     pub status_line: String,
     pub last_transfer: Option<LastTransfer>,
-    pub last_transfer_pinned: bool,
     auto_reset_gen: u64,
     pub cancel: Arc<AtomicBool>,
 
@@ -286,7 +285,6 @@ impl AppState {
             transferring: false,
             status_line: String::new(),
             last_transfer: None,
-            last_transfer_pinned: false,
             auto_reset_gen: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             new_name: String::new(),
@@ -324,6 +322,39 @@ impl AppState {
             .as_ref()
             .map(|d| d.hosts())
             .unwrap_or_default()
+    }
+
+    pub fn last_transfer_kind(&self) -> &'static str {
+        if self.transferring {
+            "testing"
+        } else {
+            self.last_transfer
+                .as_ref()
+                .map(LastTransfer::kind)
+                .unwrap_or("idle")
+        }
+    }
+
+    pub fn last_transfer_label(&self) -> &'static str {
+        if self.transferring {
+            "In progress"
+        } else {
+            self.last_transfer
+                .as_ref()
+                .map(LastTransfer::label)
+                .unwrap_or("None")
+        }
+    }
+
+    pub fn last_transfer_detail(&self) -> String {
+        if self.transferring {
+            "Transfer in progress".into()
+        } else {
+            self.last_transfer
+                .as_ref()
+                .map(LastTransfer::detail)
+                .unwrap_or_else(|| "No transfer yet".into())
+        }
     }
 
     pub fn bg_pending(&self) -> bool {
@@ -880,7 +911,6 @@ impl AppState {
             LastTransfer::Cancelled => "Cancelled".into(),
         };
         self.last_transfer = Some(last);
-        self.last_transfer_pinned = false;
         self.schedule_auto_reset();
     }
 
@@ -912,20 +942,15 @@ impl AppState {
 
     fn apply_auto_reset(&mut self) {
         self.wipe_plan();
-        self.last_transfer_pinned = self.last_transfer.is_some();
     }
 
     pub fn reset_transfer(&mut self) {
         if self.transferring {
             return;
         }
-        let clear_last = self.last_transfer_pinned;
         self.note_user_activity();
-        if clear_last {
-            self.last_transfer = None;
-        }
+        self.last_transfer = None;
         self.wipe_plan();
-        self.last_transfer_pinned = self.last_transfer.is_some();
     }
 
     pub fn ensure_files_listed(&mut self) {
@@ -1031,8 +1056,6 @@ impl AppState {
         };
 
         self.note_user_activity();
-        self.last_transfer = None;
-        self.last_transfer_pinned = false;
         self.transferring = true;
         self.cancel.store(false, Ordering::SeqCst);
         self.progress = Progress {
