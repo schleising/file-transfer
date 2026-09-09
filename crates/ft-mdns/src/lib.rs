@@ -36,8 +36,7 @@ impl Discovery {
     }
 
     pub fn hosts(&self) -> Vec<DiscoveredHost> {
-        let guard = self.inner.lock().unwrap();
-        let mut v: Vec<_> = guard.values().cloned().collect();
+        let mut v: Vec<_> = lock_map(&self.inner).values().cloned().collect();
         v.sort_by_key(|a| a.name.to_lowercase());
         v
     }
@@ -59,7 +58,7 @@ fn browse_loop(
                 let fullname = info.get_fullname().to_string();
                 let host = info.get_hostname().trim_end_matches('.').to_string();
                 let short = fullname.split('.').next().unwrap_or(&fullname).to_string();
-                map.lock().unwrap().insert(
+                lock_map(&map).insert(
                     fullname,
                     DiscoveredHost {
                         name: short,
@@ -69,10 +68,19 @@ fn browse_loop(
                 );
             }
             Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
-                map.lock().unwrap().remove(&fullname);
+                lock_map(&map).remove(&fullname);
             }
             Ok(_) => {}
             Err(_) => break,
         }
+    }
+}
+
+fn lock_map(
+    map: &Mutex<HashMap<String, DiscoveredHost>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, DiscoveredHost>> {
+    match map.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }

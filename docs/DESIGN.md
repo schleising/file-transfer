@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.3.5**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
+**Status:** Implemented (personal-use **1.3.6**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
 ## 1. Overview
 

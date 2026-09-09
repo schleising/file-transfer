@@ -46,14 +46,14 @@ pub fn attach_menubar() {
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::quit(None),
         ]);
-        let tray = TrayIconBuilder::new()
+        let mut builder = TrayIconBuilder::new()
             .with_tooltip("File Transfer")
-            .with_icon(menubar_icon())
-            .with_icon_as_template(true)
             .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
-            .build()
-            .expect("menubar extra");
+            .with_menu_on_left_click(false);
+        if let Some(icon) = menubar_icon() {
+            builder = builder.with_icon(icon).with_icon_as_template(true);
+        }
+        let tray = builder.build().ok();
         (Rc::new(open_at_login), tray)
     });
 
@@ -65,14 +65,16 @@ pub fn attach_menubar() {
             return;
         }
         tray_busy.set(transferring);
-        let _ = tray.set_icon_with_as_template(
-            Some(if transferring {
-                menubar_icon_busy()
-            } else {
-                menubar_icon()
-            }),
-            true,
-        );
+        let Some(tray) = &tray else {
+            return;
+        };
+        if let Some(icon) = if transferring {
+            menubar_icon_busy()
+        } else {
+            menubar_icon()
+        } {
+            let _ = tray.set_icon_with_as_template(Some(icon), true);
+        }
         let _ = tray.set_tooltip(Some(if transferring {
             "File Transfer — transferring"
         } else {
@@ -389,22 +391,22 @@ fn bootstrap_agent(plist: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn menubar_icon() -> Icon {
+fn menubar_icon() -> Option<Icon> {
     icon_from_pixels(paint_transfer_arrows)
 }
 
-fn menubar_icon_busy() -> Icon {
+fn menubar_icon_busy() -> Option<Icon> {
     icon_from_pixels(|px, s| {
         paint_transfer_arrows(px, s);
         draw_circle(px, s, 21, 22, 18);
     })
 }
 
-fn icon_from_pixels(paint: impl FnOnce(&mut [u8], u32)) -> Icon {
+fn icon_from_pixels(paint: impl FnOnce(&mut [u8], u32)) -> Option<Icon> {
     const S: u32 = 44;
     let mut px = vec![0u8; (S * S * 4) as usize];
     paint(&mut px, S);
-    Icon::from_rgba(px, S, S).expect("menubar icon")
+    Icon::from_rgba(px, S, S).ok()
 }
 
 fn paint_transfer_arrows(px: &mut [u8], s: u32) {

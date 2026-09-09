@@ -10,27 +10,32 @@ const PNG: &[u8] = include_bytes!("../assets/AppIcon.png");
 /// Data-URL for the sidebar mark (downscaled so WKWebView is not holding a 1024² PNG).
 pub fn brand_src() -> &'static str {
     static SRC: OnceLock<String> = OnceLock::new();
-    SRC.get_or_init(|| {
-        let mut png = Vec::new();
-        icon_rgba(64)
-            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-            .expect("encode brand icon");
-        format!("data:image/png;base64,{}", encode_base64(&png))
+    SRC.get_or_init(|| match brand_png() {
+        Some(png) => format!("data:image/png;base64,{}", encode_base64(&png)),
+        None => String::new(),
     })
 }
 
 pub fn about_icon() -> Option<dioxus::desktop::muda::Icon> {
-    let img = icon_rgba(256);
+    let img = icon_rgba(256)?;
     let (w, h) = img.dimensions();
     dioxus::desktop::muda::Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
-fn icon_rgba(px: u32) -> RgbaImage {
-    let img = image::load_from_memory(PNG).expect("AppIcon.png");
-    let img = img
-        .resize_exact(px, px, image::imageops::FilterType::Lanczos3)
-        .into_rgba8();
-    apply_macos_icon_mask(img)
+fn brand_png() -> Option<Vec<u8>> {
+    let img = icon_rgba(64)?;
+    let mut png = Vec::new();
+    img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(png)
+}
+
+fn icon_rgba(px: u32) -> Option<RgbaImage> {
+    let img = image::load_from_memory(PNG).ok()?;
+    Some(apply_macos_icon_mask(
+        img.resize_exact(px, px, image::imageops::FilterType::Lanczos3)
+            .into_rgba8(),
+    ))
 }
 
 /// Clip to the macOS / iOS app-icon squircle (superellipse, n = 5).

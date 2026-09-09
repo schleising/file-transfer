@@ -383,10 +383,17 @@ where
 mod tests {
     use super::*;
 
+    fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(err) => panic!("{err:?}"),
+        }
+    }
+
     #[test]
     fn roundtrip_computer_location() {
-        let store = Store::open(":memory:").unwrap();
-        let local = store.local_computer().unwrap();
+        let store = must(Store::open(":memory:"));
+        let local = must(store.local_computer());
         assert!(local.is_local);
 
         let now = Utc::now();
@@ -402,7 +409,7 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        store.upsert_computer(&remote).unwrap();
+        must(store.upsert_computer(&remote));
 
         let loc = Location {
             id: Uuid::new_v4(),
@@ -414,24 +421,22 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        store.upsert_location(&loc).unwrap();
-        assert_eq!(store.locations_for(remote.id).unwrap().len(), 1);
+        must(store.upsert_location(&loc));
+        assert_eq!(must(store.locations_for(remote.id)).len(), 1);
     }
 
     #[test]
     fn settings_roundtrip() {
-        let store = Store::open(":memory:").unwrap();
-        assert_eq!(store.setting("window.frame").unwrap(), None);
-        store
-            .set_setting("window.frame", "100 80 1280 840")
-            .unwrap();
+        let store = must(Store::open(":memory:"));
+        assert_eq!(must(store.setting("window.frame")), None);
+        must(store.set_setting("window.frame", "100 80 1280 840"));
         assert_eq!(
-            store.setting("window.frame").unwrap().as_deref(),
+            must(store.setting("window.frame")).as_deref(),
             Some("100 80 1280 840")
         );
-        store.set_setting("window.frame", "10 20 1300 860").unwrap();
+        must(store.set_setting("window.frame", "10 20 1300 860"));
         assert_eq!(
-            store.setting("window.frame").unwrap().as_deref(),
+            must(store.setting("window.frame")).as_deref(),
             Some("10 20 1300 860")
         );
     }

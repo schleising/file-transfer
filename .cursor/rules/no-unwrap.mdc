@@ -1,0 +1,22 @@
+---
+description: Never use unwrap() or expect() in Rust
+globs: "**/*.rs"
+alwaysApply: true
+---
+
+# No unwrap or expect
+
+Never call `unwrap()` or `expect()` in Rust, including tests and “infallible” setup.
+
+Use `?`, `match`, `if let`, `ok()`, or `unwrap_or` / `unwrap_or_else` / `unwrap_or_default`.
+
+For `Mutex::lock()`, recover poison:
+
+```rust
+match m.lock() {
+    Ok(g) => g,
+    Err(p) => p.into_inner(),
+}
+```
+
+In tests, fail with `assert!` or `let … else { panic!(…) }`, not `unwrap`/`expect`.

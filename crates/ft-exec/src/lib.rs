@@ -1339,10 +1339,16 @@ mod tests {
 
     #[test]
     fn parse_progress() {
-        let p =
-            parse_progress2("  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=0/1)").unwrap();
+        let Some(p) =
+            parse_progress2("  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=0/1)")
+        else {
+            panic!("parse_progress2");
+        };
         assert_eq!(p.bytes_done, 1_048_576);
-        assert!((p.bytes_per_sec.unwrap() - 10.0 * 1024.0 * 1024.0).abs() < 1.0);
+        let Some(bps) = p.bytes_per_sec else {
+            panic!("bytes_per_sec");
+        };
+        assert!((bps - 10.0 * 1024.0 * 1024.0).abs() < 1.0);
         assert_eq!(p.percent, Some(50));
         assert_eq!(p.to_chk, Some((0, 1)));
     }
@@ -1355,7 +1361,9 @@ mod tests {
 
     #[test]
     fn parse_ir_chk() {
-        let p = parse_progress2("  999 100%  1.00MB/s    0:00:01 (xfr#2, ir-chk=12/40)").unwrap();
+        let Some(p) = parse_progress2("  999 100%  1.00MB/s    0:00:01 (xfr#2, ir-chk=12/40)") else {
+            panic!("parse_progress2");
+        };
         assert_eq!(p.percent, Some(100));
         assert_eq!(p.to_chk, Some((12, 40)));
         assert!(!transfer_data_complete(&p));
@@ -1363,8 +1371,11 @@ mod tests {
 
     #[test]
     fn data_complete_when_to_chk_zero() {
-        let p =
-            parse_progress2("  1,048,576  100%  10.00MB/s    0:00:01 (xfr#4, to-chk=0/4)").unwrap();
+        let Some(p) =
+            parse_progress2("  1,048,576  100%  10.00MB/s    0:00:01 (xfr#4, to-chk=0/4)")
+        else {
+            panic!("parse_progress2");
+        };
         assert!(transfer_data_complete(&p));
     }
 
@@ -1399,9 +1410,13 @@ mod tests {
     #[test]
     fn mkdir_local_creates_and_rejects_existing() {
         let parent = std::env::temp_dir().join(format!("ft-exec-mkdir-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&parent).unwrap();
+        if let Err(err) = std::fs::create_dir_all(&parent) {
+            panic!("{err}");
+        }
         let child = parent.join("new folder");
-        mkdir(&local_host(), &child).unwrap();
+        if let Err(err) = mkdir(&local_host(), &child) {
+            panic!("{err}");
+        }
         assert!(child.is_dir());
         assert!(mkdir(&local_host(), &child).is_err());
         let _ = std::fs::remove_dir_all(&parent);

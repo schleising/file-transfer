@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 pub fn app() -> Element {
-    let mut state = use_signal(|| AppState::new().expect("open File Transfer store"));
+    let mut state = use_signal(AppState::new);
     use_context_provider(|| state);
     crate::window_frame::attach_persistence();
     #[cfg(target_os = "macos")]

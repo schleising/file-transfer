@@ -27,3 +27,6 @@ identifier = "local.file-transfer"
 short_description = "Direct rsync-over-SSH file transfers"
 category = "Utility"
 osx_minimum_system_version = "13.0"
+
+[lints]
+workspace = true

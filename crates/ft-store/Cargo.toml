@@ -10,3 +10,6 @@ chrono.workspace = true
 dirs.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
+
+[lints]
+workspace = true

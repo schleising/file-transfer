@@ -260,8 +260,20 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> Result<Self> {
-        let store = Store::open_default()?;
+    pub fn new() -> Self {
+        let (store, warning) = match Store::open_default() {
+            Ok(store) => (store, None),
+            Err(err) => match Store::open(":memory:") {
+                Ok(store) => (
+                    store,
+                    Some(format!("Could not open the local store: {err:#}")),
+                ),
+                Err(mem_err) => {
+                    eprintln!("File Transfer could not open a store: {err:#}; {mem_err:#}");
+                    std::process::exit(1);
+                }
+            },
+        };
         let (bg, rx) = BgTx::pair();
         let mut app = Self {
             store,
@@ -301,7 +313,10 @@ impl AppState {
             app.source_computer = Some(local.id);
             app.dest_computer = Some(local.id);
         }
-        Ok(app)
+        if let Some(warning) = warning {
+            app.status_line = warning;
+        }
+        app
     }
 
     pub fn reload_store(&mut self) {
