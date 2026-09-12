@@ -28,4 +28,4 @@ dirs = "7.0.0"
 dioxus = { version = "0.8.0-alpha.1", features = ["desktop"] }
 futures-timer = "3.0.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-uuid = { version = "1.26.0", features = ["v4"] }
+uuid = { version = "1.26.1", features = ["v4"] }
