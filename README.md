@@ -1,6 +1,6 @@
 # File Transfer
 
-macOS app that orchestrates **direct** file transfers between computers using **SSH** and **Homebrew rsync**. See [docs/DESIGN.md](docs/DESIGN.md).
+macOS app that orchestrates **direct** file transfers between computers using **SSH** and **Homebrew rsync**. See [docs/DESIGN.md](docs/DESIGN.md). Android on the LAN is assessed in [docs/ANDROID.md](docs/ANDROID.md) (not implemented).
 
 ## Build & install (personal use)
 

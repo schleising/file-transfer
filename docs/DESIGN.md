@@ -2,6 +2,8 @@
 
 **Status:** Implemented (personal-use **1.3.6**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
+Related: [Android LAN controller assessment](ANDROID.md) (not implemented).
+
 ## 1. Overview
 
 A **macOS** desktop application that orchestrates file transfers between computers using **SSH** and **rsync** (Homebrew on macOS). The app installs as **File Transfer.app** under `/Applications` (bundle id `local.file-transfer`). Linux machines are **source and/or destination only**—they never run this GUI.
