@@ -2,22 +2,26 @@
 
 use crate::state::AppState;
 use dioxus::desktop::tao::event::{Event, WindowEvent};
-use dioxus::desktop::trayicon::menu::{CheckMenuItem, Menu, MenuId, PredefinedMenuItem};
+use dioxus::desktop::trayicon::menu::{
+    CheckMenuItem, ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem,
+};
 use dioxus::desktop::trayicon::{
-    Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
+    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use dioxus::desktop::{
     use_muda_event_handler, use_tray_icon_event_handler, use_tray_menu_event_handler,
     use_wry_event_handler,
 };
 use dioxus::prelude::*;
-use objc2::msg_send;
+use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
+use objc2::{msg_send, sel, MainThreadMarker};
+use objc2_app_kit::NSMenu;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AGENT_LABEL: &str = "local.file-transfer";
 const INSTALLED_APP: &str = "/Applications/File Transfer.app";
@@ -35,30 +39,32 @@ static STARTUP_REOPEN: AtomicBool = AtomicBool::new(false);
 static PROCESS_START_MS: AtomicU64 = AtomicU64::new(0);
 
 const STARTUP_REOPEN_GRACE_MS: u64 = 2500;
+static EXTRA_MENU_OPEN: AtomicBool = AtomicBool::new(false);
+static QUIT_WHEN_EXTRA_MENU_CLOSES: AtomicBool = AtomicBool::new(false);
 
 pub fn attach_menubar() {
     let _ = PROCESS_START_MS.compare_exchange(0, now_ms(), Ordering::SeqCst, Ordering::SeqCst);
-    let (open_at_login, tray) = use_hook(|| {
+    let (open_at_login, quit, tray, menu) = use_hook(|| {
         let open_at_login = CheckMenuItem::new("Open at Login", true, login_item_enabled(), None);
+        let quit = MenuItem::new("Quit", true, None);
         let menu = Menu::new();
-        let _ = menu.append_items(&[
-            &open_at_login,
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::quit(None),
-        ]);
+        let _ = menu.append_items(&[&open_at_login, &PredefinedMenuItem::separator(), &quit]);
+        // macOS 27 pops NSStatusItem.menu on every click; attach it only for right-click.
         let mut builder = TrayIconBuilder::new()
             .with_tooltip("File Transfer")
-            .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false);
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(false);
         if let Some(icon) = menubar_icon() {
             builder = builder.with_icon(icon).with_icon_as_template(true);
         }
         let tray = builder.build().ok();
-        (Rc::new(open_at_login), tray)
+        (Rc::new(open_at_login), Rc::new(quit), tray, menu)
     });
 
     let state = use_context::<Signal<AppState>>();
     let mut tray_busy = use_signal(|| false);
+    let tray_clicks = tray.clone();
+    let menu_clicks = menu;
     use_effect(move || {
         let transferring = state.read().transferring;
         if *tray_busy.peek() == transferring {
@@ -104,24 +110,41 @@ pub fn attach_menubar() {
         _ => {}
     });
 
-    use_tray_icon_event_handler(|event| {
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Down,
-            ..
-        } = event
-        {
-            toggle_window();
+    use_tray_icon_event_handler(move |event| {
+        match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Down,
+                ..
+            } => toggle_window(),
+            TrayIconEvent::Click {
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Down,
+                ..
+            } => {
+                let tray = tray_clicks.clone();
+                let menu = menu_clicks.clone();
+                spawn(async move {
+                    // After this click handler returns; performClick nested here hangs Quit.
+                    futures_timer::Delay::new(Duration::ZERO).await;
+                    if let Some(tray) = tray.as_ref() {
+                        pop_extra_menu(tray, &menu);
+                    }
+                });
+            }
+            _ => {}
         }
     });
 
     let login_tray = open_at_login.clone();
+    let quit_tray = quit.clone();
     use_tray_menu_event_handler(move |event| {
-        apply_open_at_login(&login_tray, &event.id);
+        on_extra_menu_event(&login_tray, &quit_tray, &event.id);
     });
     let login_muda = open_at_login.clone();
+    let quit_muda = quit.clone();
     use_muda_event_handler(move |event| {
-        apply_open_at_login(&login_muda, &event.id);
+        on_extra_menu_event(&login_muda, &quit_muda, &event.id);
     });
 
     use_future(|| async {
@@ -138,6 +161,61 @@ pub fn attach_menubar() {
         }
         STARTUP_VISIBILITY_LOCKED.store(true, Ordering::SeqCst);
     });
+}
+
+fn pop_extra_menu(tray: &TrayIcon, menu: &Menu) {
+    let Some(item) = tray.ns_status_item() else {
+        return;
+    };
+    let Some(ns_menu) = (unsafe { Retained::<NSMenu>::retain(menu.ns_menu().cast()) }) else {
+        return;
+    };
+    EXTRA_MENU_OPEN.store(true, Ordering::SeqCst);
+    item.setMenu(Some(&ns_menu));
+    if let Some(mtm) = MainThreadMarker::new() {
+        if let Some(button) = item.button(mtm) {
+            unsafe {
+                button.performClick(None);
+            }
+        }
+    }
+    let quit = QUIT_WHEN_EXTRA_MENU_CLOSES.swap(false, Ordering::SeqCst);
+    EXTRA_MENU_OPEN.store(false, Ordering::SeqCst);
+    if quit {
+        schedule_terminate();
+        return;
+    }
+    item.setMenu(None);
+}
+
+fn on_extra_menu_event(login: &CheckMenuItem, quit: &MenuItem, event_id: &MenuId) {
+    apply_open_at_login(login, event_id);
+    if event_id != quit.id() {
+        return;
+    }
+    QUIT_WHEN_EXTRA_MENU_CLOSES.store(true, Ordering::SeqCst);
+    if !EXTRA_MENU_OPEN.load(Ordering::SeqCst) {
+        schedule_terminate();
+    }
+}
+
+fn schedule_terminate() {
+    crate::window_frame::save();
+    unsafe {
+        let Some(cls) = AnyClass::get(c"NSApplication") else {
+            std::process::exit(0);
+        };
+        let app: *mut AnyObject = msg_send![cls, sharedApplication];
+        if app.is_null() {
+            std::process::exit(0);
+        }
+        let _: () = msg_send![
+            app,
+            performSelector: sel!(terminate:),
+            withObject: std::ptr::null::<AnyObject>(),
+            afterDelay: 0.0_f64
+        ];
+    }
 }
 
 fn apply_open_at_login(item: &CheckMenuItem, event_id: &MenuId) {
