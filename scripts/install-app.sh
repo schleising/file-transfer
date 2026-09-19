@@ -6,6 +6,28 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
+# Local Network privacy (macOS 15+) tracks identity by code signature (TN3179).
+# Prefer an Apple-issued identity so the grant survives rebuilds; otherwise ad-hoc.
+sign_app() {
+  local app="$1"
+  local identity=""
+  identity="$(security find-identity -v -p codesigning 2>/dev/null | awk '/Developer ID Application/ { print $2; exit }')"
+  if [[ -z "$identity" ]]; then
+    identity="$(security find-identity -v -p codesigning 2>/dev/null | awk '/Apple Development/ { print $2; exit }')"
+  fi
+  if [[ -n "$identity" ]]; then
+    echo "Signing with ${identity}..."
+    if ! codesign --force --deep --sign "$identity" --identifier local.file-transfer "$app"; then
+      echo "warning: codesign failed; Local Network permission may not stick" >&2
+    fi
+    return
+  fi
+  echo "Ad-hoc signing (no Apple code-signing identity found)..."
+  if ! codesign --force --deep --sign - --identifier local.file-transfer "$app"; then
+    echo "warning: ad-hoc codesign failed; Local Network permission may not stick" >&2
+  fi
+}
+
 echo "Building release binary..."
 cargo build --release -p ft-app
 
@@ -66,6 +88,12 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <true/>
   <key>NSQuitAlwaysKeepsWindows</key>
   <false/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>File Transfer discovers SSH hosts on your local network and copies files to them.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_ssh._tcp</string>
+  </array>
 </dict>
 </plist>
 PLIST
@@ -77,4 +105,6 @@ echo "Installing to ${DEST}..."
 rm -rf "$DEST"
 cp -R "$APP_DIR" "$DEST"
 touch "$DEST"
+sign_app "$DEST"
 echo "Installed to ${DEST}"
+echo "On first launch, allow File Transfer under System Settings → Privacy & Security → Local Network."

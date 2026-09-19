@@ -31,7 +31,9 @@ pub enum BgMsg {
     },
     Progress(Progress),
     TransferDone(Result<(u64, bool), String>),
-    AutoReset { gen: u64 },
+    AutoReset {
+        gen: u64,
+    },
 }
 
 #[derive(Clone)]

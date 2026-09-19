@@ -134,6 +134,20 @@ fn peer_ssh_command(peer: &HostRef) -> String {
     parts.join(" ")
 }
 
+fn explain_controller_ssh_error(stderr: &str) -> String {
+    let msg = stderr.trim();
+    if looks_like_local_network_blocked(msg) {
+        "SSH failed: no route to host. Allow File Transfer in System Settings → Privacy & Security → Local Network, then retry.".into()
+    } else {
+        format!("SSH failed: {msg}")
+    }
+}
+
+fn looks_like_local_network_blocked(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("no route to host") || lower.contains("network is unreachable")
+}
+
 fn explain_peer_ssh_error(from: &HostRef, to: &HostRef, stderr: &str) -> String {
     let msg = stderr.trim();
     if msg.contains("Host key verification failed") {
@@ -194,7 +208,7 @@ pub fn test_ssh(host: &HostRef) -> Result<()> {
     let out = cmd.output().context("spawn ssh")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        bail!("SSH failed: {}", err.trim());
+        bail!("{}", explain_controller_ssh_error(&err));
     }
     Ok(())
 }
@@ -1339,8 +1353,7 @@ mod tests {
 
     #[test]
     fn parse_progress() {
-        let Some(p) =
-            parse_progress2("  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=0/1)")
+        let Some(p) = parse_progress2("  1,048,576  50%  10.00MB/s    0:00:01 (xfr#1, to-chk=0/1)")
         else {
             panic!("parse_progress2");
         };
@@ -1361,7 +1374,8 @@ mod tests {
 
     #[test]
     fn parse_ir_chk() {
-        let Some(p) = parse_progress2("  999 100%  1.00MB/s    0:00:01 (xfr#2, ir-chk=12/40)") else {
+        let Some(p) = parse_progress2("  999 100%  1.00MB/s    0:00:01 (xfr#2, ir-chk=12/40)")
+        else {
             panic!("parse_progress2");
         };
         assert_eq!(p.percent, Some(100));
@@ -1396,6 +1410,17 @@ mod tests {
     #[test]
     fn quote() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn controller_ssh_no_route_hints_local_network() {
+        let msg = explain_controller_ssh_error(
+            "ssh: connect to host nas.local port 22: No route to host",
+        );
+        assert!(msg.contains("Local Network"), "{msg}");
+        let other = explain_controller_ssh_error("Permission denied (publickey).");
+        assert!(other.contains("Permission denied"), "{other}");
+        assert!(!other.contains("Local Network"), "{other}");
     }
 
     fn local_host() -> HostRef {

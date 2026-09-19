@@ -8,6 +8,9 @@ mod util;
 mod window_frame;
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    macos::trigger_local_network_privacy_alert();
+
     let window = {
         let mut builder =
             window_frame::apply(dioxus::desktop::WindowBuilder::new().with_title("File Transfer"));

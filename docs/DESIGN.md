@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.3.9**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
+**Status:** Implemented (personal-use **1.3.10**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
 Related: [Android LAN controller assessment](ANDROID.md) (not implemented).
 
@@ -76,7 +76,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 | Requirement | Notes |
 |-------------|--------|
-| macOS | Bonjour built in |
+| macOS | Bonjour built in; **Local Network** allowed for File Transfer (System Settings → Privacy & Security) |
 | Xcode Command Line Tools | For building |
 | Rust (rustup) | Builds `ft-app` |
 | Homebrew `rsync` | `brew install rsync` — not `/usr/bin/rsync` |
@@ -107,7 +107,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 ### Controller
 
 - macOS only; **Dioxus desktop 0.8** GUI (WKWebView, macOS-native styling). Stylesheet is `include_str!`’d at compile time (`crates/ft-app/assets/macos.css`); CSS changes require a rebuild.
-- Install: `./scripts/install-app.sh` → `cargo build --release -p ft-app`, assemble minimal `.app` (`Info.plist` sets `NSQuitAlwaysKeepsWindows = false`), copy to `/Applications`.
+- Install: `./scripts/install-app.sh` → `cargo build --release -p ft-app`, assemble minimal `.app` (`Info.plist` sets `NSQuitAlwaysKeepsWindows = false`, `NSLocalNetworkUsageDescription`, and `NSBonjourServices` = `_ssh._tcp`), copy to `/Applications`, then codesign (Apple Development / Developer ID if present, otherwise ad-hoc) so Local Network TCC can track the bundle.
 - Local rsync: `/opt/homebrew/bin/rsync` then `/usr/local/bin/rsync` (never prefer system `/usr/bin/rsync` when Homebrew exists).
 - Data dir: `~/Library/Application Support/File Transfer/` (SQLite).
 - Window: default **1280×840** logical pixels, minimum **900×560**. Last size and position are restored from the store (`settings.window.frame`). First launch lets macOS place the window. Minimized / fullscreen frames are not saved.
@@ -121,7 +121,8 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 ### Trust and startup
 
-- App always starts. Login-item and session-restore launches stay **hidden** until the extra or Dock/Finder reopen the window.
+- App always starts. Login-item and session-restore launches stay **hidden** until the extra or Dock/Finder reopen the window. The Open at Login LaunchAgent sets `AssociatedBundleIdentifiers` to `local.file-transfer`.
+- On launch the app performs a no-traffic UDP connect to the mDNS multicast addresses so macOS can show the Local Network alert (TN3179). Child `ssh` / `rsync` inherit that grant; without it, LAN TCP fails with **no route to host**.
 - **Transfer** is gated on an automatic access/preflight check (SSH and peer reachability). Failures show as **Access status** in the sidebar; they do not crash the app.
 
 ---
@@ -129,6 +130,7 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 ## 5. Discovery (Avahi / Bonjour)
 
 - Crate `ft-mdns` browses **`_ssh._tcp.local.`** via the `mdns-sd` crate **only while the Add Location sheet is open** (the daemon is shut down when the sheet closes).
+- macOS Local Network privacy must be allowed for the app (Info.plist `NSLocalNetworkUsageDescription` + `NSBonjourServices` `_ssh._tcp`). Without it, multicast browse returns nothing and SSH to LAN hosts fails with **no route to host**.
 - The **Add Location** sheet lists discoveries as **Discovered on Network**; **Add Host** saves into the store.
 - **Add host manually** (display name, SSH destination, optional port) remains supported.
 - There is no dedicated Computers tab and no in-app “Test SSH” action; reachability is the transfer preflight.
@@ -312,7 +314,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 - Locations: Finder-like **tiles** grouped by host; live drag-reorder; Add folder / Add Location.
 - Primary actions: **Continue** / **Reset** / **Transfer** use the system blue accent.
 - App menu **About File Transfer** shows name, marketing version, copyright, credits, and the app icon (not a cargo pkgid). `install-app.sh` writes the same marketing version into `CFBundleShortVersionString` / `CFBundleVersion`.
-- Packaging: minimal `Info.plist` + `AppIcon.icns` + binary `Contents/MacOS/file-transfer` (not cargo-bundle).
+- Packaging: minimal `Info.plist` (including Local Network / Bonjour keys) + `AppIcon.icns` + binary `Contents/MacOS/file-transfer` (not cargo-bundle); `install-app.sh` codesigns the installed app.
 - macOS extra: template menu-bar icon (a ring around the arrows while a transfer is running, then the default glyph); left-click toggles the window; right-click shows Open at Login and Quit. Close button **hides** the window (`WindowCloseBehaviour::WindowHides`).
 - Background UI loop: drain the transfer channel only when a message is pending (a Dioxus `write()` otherwise re-renders the whole app); poll slower while the window is hidden and idle. Bonjour host names in the Add Location sheet refresh about twice a second while that sheet is visible.
 
@@ -367,7 +369,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Install script → `/Applications` | Done |
 | History / job records | Not in v1 |
 | Overwrite policy UI / df preflight / redacted command panel | Not in v1 |
-| Signing / notarization | Out of scope |
+| Signing / notarization | Ad-hoc or Apple-issued codesign for Local Network TCC; no notarization |
 
 ---
 
@@ -401,7 +403,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Progress | Preflight total + parse **progress2 from stdout** (`\r`); `--outbuf=N`; drain both pipes; rate/ETA; **wait for rsync exit** |
 | DNS-SD | **`_ssh._tcp` only** |
 | App name / run mode | **File Transfer.app** in `/Applications` (`local.file-transfer`) |
-| Distribution | Personal build; `scripts/install-app.sh` (no cargo-bundle, no notarization) |
+| Distribution | Personal build; `scripts/install-app.sh` (no cargo-bundle, no notarization; codesign for Local Network) |
 | Rsync write mode | **`--inplace`** |
 | Folder select | **Expand to file list** before `--files-from` |
 | Remote list | **Python preferred**; bash wrapper; hide `.*` in UI listings |

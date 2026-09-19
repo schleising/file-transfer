@@ -42,9 +42,24 @@ const STARTUP_REOPEN_GRACE_MS: u64 = 2500;
 static EXTRA_MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static QUIT_WHEN_EXTRA_MENU_CLOSES: AtomicBool = AtomicBool::new(false);
 
+/// Best-effort Local Network privacy prompt (TN3179). Connecting a UDP socket to
+/// a LAN multicast address is a local-network operation but sends no traffic.
+pub fn trigger_local_network_privacy_alert() {
+    if let Ok(sock) = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) {
+        let _ = sock.connect((std::net::Ipv4Addr::new(224, 0, 0, 251), 5353));
+    }
+    if let Ok(sock) = std::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)) {
+        let _ = sock.connect((
+            std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb),
+            5353,
+        ));
+    }
+}
+
 pub fn attach_menubar() {
     let _ = PROCESS_START_MS.compare_exchange(0, now_ms(), Ordering::SeqCst, Ordering::SeqCst);
     let (open_at_login, quit, tray, menu) = use_hook(|| {
+        refresh_login_agent_if_needed();
         let open_at_login = CheckMenuItem::new("Open at Login", true, login_item_enabled(), None);
         let quit = MenuItem::new("Quit", true, None);
         let menu = Menu::new();
@@ -343,6 +358,23 @@ fn login_item_enabled() -> bool {
     agent_plist_path().is_some_and(|p| p.is_file())
 }
 
+/// Rewrite an existing Open at Login agent so TCC attributes LAN access to the app.
+fn refresh_login_agent_if_needed() {
+    let Some(plist) = agent_plist_path() else {
+        return;
+    };
+    let Ok(existing) = std::fs::read_to_string(&plist) else {
+        return;
+    };
+    if existing.contains("AssociatedBundleIdentifiers") {
+        return;
+    }
+    let Some(app) = app_bundle_path() else {
+        return;
+    };
+    let _ = std::fs::write(&plist, launch_agent_plist(&app));
+}
+
 fn set_login_item(enabled: bool) -> bool {
     let Some(plist) = agent_plist_path() else {
         return false;
@@ -407,6 +439,10 @@ fn launch_agent_plist(app: &Path) -> String {
   <string>{AGENT_LABEL}</string>
   <key>LimitLoadToSessionType</key>
   <string>Aqua</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>{AGENT_LABEL}</string>
+  </array>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/open</string>

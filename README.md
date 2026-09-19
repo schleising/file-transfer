@@ -12,6 +12,8 @@ brew install rsync
 
 This builds **File Transfer.app** and copies it to `/Applications`.
 
+On first launch after install, macOS asks to allow **local network** access. Allow it, or enable **File Transfer** under **System Settings → Privacy & Security → Local Network**. Without that grant, SSH to LAN hosts fails with **no route to host** and Bonjour `_ssh._tcp` discovery stays empty. If the toggle is already on after an OS update, turn it off and on again.
+
 Data is stored under `~/Library/Application Support/File Transfer/`.
 
 ## Develop
