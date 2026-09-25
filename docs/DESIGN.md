@@ -1,8 +1,8 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.3.10**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
+**Status:** Implemented (personal-use **1.3.11**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
-Related: [Android LAN controller assessment](ANDROID.md) (not implemented).
+Related: [Android LAN controller assessment](ANDROID.md) (not implemented). [Controller sleep / disconnect](SLEEP.md) (not implemented).
 
 ## 1. Overview
 
@@ -214,6 +214,8 @@ Controller must not run `rsync A:… B:…` (that relays via the Mac).
 
 Probe and data-plane `-e ssh …` use the same non-interactive options as the controller (`accept-new`, etc.). Host key failures cite the exact peer name configured in the app.
 
+When source and destination are the **same SSH endpoint** (same destination, defaulting an omitted port to 22), the job is a same-host copy: the controller SSHs to that machine and runs rsync between the two folders. The host does not SSH to itself. Identical source and destination folders are rejected.
+
 ### Path layout
 
 Relative structure under the destination folder is preserved.
@@ -370,6 +372,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | History / job records | Not in v1 |
 | Overwrite policy UI / df preflight / redacted command panel | Not in v1 |
 | Signing / notarization | Ad-hoc or Apple-issued codesign for Local Network TCC; no notarization |
+| Controller sleep / lid close | Not implemented; see [SLEEP.md](SLEEP.md) |
 
 ---
 
@@ -399,7 +402,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Window | Default **1280×840**; persist logical size + position in `settings` |
 | Close / login | **Hide to menu-bar extra**; Open at Login via LaunchAgent `--hidden` |
 | Post-transfer auto-reset | **5s then plan Reset** after success, failure, or cancel (**W1**); cancelled by interaction (**T2**); persistent sidebar Last transfer (**B**); **Reset** returns Last transfer to None |
-| Remote→remote | Probe both; **prefer push** |
+| Remote→remote | Same SSH endpoint: **rsync on that host**; otherwise probe both and **prefer push** |
 | Progress | Preflight total + parse **progress2 from stdout** (`\r`); `--outbuf=N`; drain both pipes; rate/ETA; **wait for rsync exit** |
 | DNS-SD | **`_ssh._tcp` only** |
 | App name / run mode | **File Transfer.app** in `/Applications` (`local.file-transfer`) |

@@ -48,6 +48,8 @@ pub enum TransferMode {
     LocalCopy,
     LocalToRemote,
     RemoteToLocal,
+    /// Both folders are on one remote SSH host. rsync runs there; no peer SSH.
+    RemoteSameHost,
     RemotePush,
     RemotePull,
 }
@@ -615,6 +617,44 @@ printf '%s %s\n' "$bytes" "$files"
     Ok((bytes, files))
 }
 
+/// Two remotes that share an SSH destination are one machine. Port 22 is the default.
+fn same_ssh_endpoint(a: &HostRef, b: &HostRef) -> bool {
+    if a.is_local || b.is_local {
+        return false;
+    }
+    let dest_a = a.ssh_destination.trim();
+    let dest_b = b.ssh_destination.trim();
+    !dest_a.is_empty() && dest_a == dest_b && a.ssh_port.unwrap_or(22) == b.ssh_port.unwrap_or(22)
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().trim_end_matches('/') == b.to_string_lossy().trim_end_matches('/')
+}
+
+fn remote_pair_mode(
+    source: &HostRef,
+    dest: &HostRef,
+    source_base: &Path,
+    dest_base: &Path,
+) -> Result<TransferMode> {
+    if same_ssh_endpoint(source, dest) {
+        if same_folder(source_base, dest_base) {
+            bail!("source and destination are the same folder");
+        }
+        return Ok(TransferMode::RemoteSameHost);
+    }
+    // Prefer push; fall back to pull.
+    match test_peer_ssh(source, dest) {
+        Ok(()) => Ok(TransferMode::RemotePush),
+        Err(push_err) => match test_peer_ssh(dest, source) {
+            Ok(()) => Ok(TransferMode::RemotePull),
+            Err(pull_err) => {
+                bail!("cannot reach peer either way. Push: {push_err:#}. Pull: {pull_err:#}")
+            }
+        },
+    }
+}
+
 pub fn plan_transfer(
     source: HostRef,
     dest: HostRef,
@@ -634,18 +674,7 @@ pub fn plan_transfer(
         (true, true) => TransferMode::LocalCopy,
         (true, false) => TransferMode::LocalToRemote,
         (false, true) => TransferMode::RemoteToLocal,
-        (false, false) => {
-            // Prefer push; fall back to pull.
-            match test_peer_ssh(&source, &dest) {
-                Ok(()) => TransferMode::RemotePush,
-                Err(push_err) => match test_peer_ssh(&dest, &source) {
-                    Ok(()) => TransferMode::RemotePull,
-                    Err(pull_err) => bail!(
-                        "cannot reach peer either way. Push: {push_err:#}. Pull: {pull_err:#}"
-                    ),
-                },
-            }
-        }
+        (false, false) => remote_pair_mode(&source, &dest, &source_base, &dest_base)?,
     };
 
     Ok(TransferPlan {
@@ -666,7 +695,7 @@ pub fn preflight_start(plan: &TransferPlan) -> Result<()> {
     if !plan.source.is_local {
         test_ssh(&plan.source).context("cannot SSH to source")?;
     }
-    if !plan.dest.is_local {
+    if !plan.dest.is_local && plan.mode != TransferMode::RemoteSameHost {
         // Dest must be reachable from controller for validation / some modes;
         // for remote-remote push, controller still benefits from knowing dest exists.
         let _ = test_ssh(&plan.dest);
@@ -705,6 +734,9 @@ pub fn run_transfer(
     let result = match plan.mode {
         TransferMode::LocalCopy | TransferMode::LocalToRemote | TransferMode::RemoteToLocal => {
             run_rsync_local_client(plan, &rsync, &files_from, cancel.clone(), &on_progress)
+        }
+        TransferMode::RemoteSameHost => {
+            run_remote_same_host(plan, &files_from, cancel.clone(), &on_progress)
         }
         TransferMode::RemotePush => run_remote_orchestrated(
             plan,
@@ -829,6 +861,71 @@ fn maybe_rsync_path_for_remote(cmd: &mut Command, _host: &HostRef) {
     cmd.arg("--rsync-path=rsync");
 }
 
+fn upload_files_from(host: &HostRef, files_from: &Path) -> Result<String> {
+    let remote_list = format!("/tmp/ft-files-{}.txt", uuid::Uuid::new_v4());
+    let mut cmd = Command::new("scp");
+    for o in ssh_common_opts() {
+        cmd.arg(o);
+    }
+    if let Some(port) = host.ssh_port {
+        cmd.arg("-P").arg(port.to_string());
+    }
+    if let Some(id) = &host.identity_file {
+        cmd.arg("-i").arg(id);
+    }
+    cmd.arg(files_from)
+        .arg(format!("{}:{remote_list}", host.ssh_destination));
+    let out = cmd.output().context("scp files-from")?;
+    if !out.status.success() {
+        bail!(
+            "failed to upload file list: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(remote_list)
+}
+
+fn trimmed_base(path: &Path) -> String {
+    path.to_string_lossy().trim_end_matches('/').to_string()
+}
+
+const REMOTE_RSYNC_PREFIX: &str = "RSYNC=$(command -v rsync); \
+     [ -x /usr/local/bin/rsync ] && RSYNC=/usr/local/bin/rsync; \
+     [ -x /opt/homebrew/bin/rsync ] && RSYNC=/opt/homebrew/bin/rsync; \
+     if [ -z \"$RSYNC\" ]; then echo 'rsync missing on this host' >&2; exit 127; fi; ";
+
+fn run_remote_same_host(
+    plan: &TransferPlan,
+    files_from: &Path,
+    cancel: Arc<AtomicBool>,
+    on_progress: &impl Fn(Progress),
+) -> Result<TransferResult> {
+    let remote_list = upload_files_from(&plan.source, files_from)?;
+    let src = shell_quote(&trimmed_base(&plan.source_base));
+    let dst = shell_quote(&trimmed_base(&plan.dest_base));
+    let list = shell_quote(&remote_list);
+    let body = format!(
+        "if command -v stdbuf >/dev/null 2>&1; then \
+           stdbuf -oL \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --out-format=%i --files-from={list} {src}/ {dst}/; \
+         else \
+           \"$RSYNC\" -a -r --inplace --info=progress2 --outbuf=N --out-format=%i --files-from={list} {src}/ {dst}/; \
+         fi; ec=$?; rm -f {list}; exit $ec"
+    );
+    let mut cmd = ssh_orchestrate(&plan.source);
+    cmd.arg(format!("{REMOTE_RSYNC_PREFIX}{body}"));
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn().context("spawn same-host rsync via ssh")?;
+    watch_child(
+        child,
+        plan.bytes_total,
+        plan.file_count,
+        cancel,
+        on_progress,
+    )
+}
+
 fn run_remote_orchestrated(
     plan: &TransferPlan,
     _local_rsync: &Path,
@@ -840,29 +937,7 @@ fn run_remote_orchestrated(
     let runner = if push { &plan.source } else { &plan.dest };
     let peer = if push { &plan.dest } else { &plan.source };
 
-    // Upload files-from list to runner temp.
-    let remote_list = format!("/tmp/ft-files-{}.txt", uuid::Uuid::new_v4());
-    {
-        let mut cmd = Command::new("scp");
-        for o in ssh_common_opts() {
-            cmd.arg(o);
-        }
-        if let Some(port) = runner.ssh_port {
-            cmd.arg("-P").arg(port.to_string());
-        }
-        if let Some(id) = &runner.identity_file {
-            cmd.arg("-i").arg(id);
-        }
-        cmd.arg(files_from)
-            .arg(format!("{}:{}", runner.ssh_destination, remote_list));
-        let out = cmd.output().context("scp files-from")?;
-        if !out.status.success() {
-            bail!(
-                "failed to upload file list: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-    }
+    let remote_list = upload_files_from(runner, files_from)?;
 
     let src_base = plan
         .source_base
@@ -878,11 +953,7 @@ fn run_remote_orchestrated(
     let ssh_e = peer_ssh_command(peer);
 
     let script = format!(
-        "RSYNC=$(command -v rsync); \
-         [ -x /usr/local/bin/rsync ] && RSYNC=/usr/local/bin/rsync; \
-         [ -x /opt/homebrew/bin/rsync ] && RSYNC=/opt/homebrew/bin/rsync; \
-         if [ -z \"$RSYNC\" ]; then echo 'rsync missing on this host' >&2; exit 127; fi; \
-         {body}",
+        "{REMOTE_RSYNC_PREFIX}{body}",
         body = if push {
             format!(
                 "if command -v stdbuf >/dev/null 2>&1; then \
@@ -1410,6 +1481,41 @@ mod tests {
     #[test]
     fn quote() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    fn remote_host(dest: &str, port: Option<u16>) -> HostRef {
+        HostRef {
+            is_local: false,
+            ssh_destination: dest.into(),
+            ssh_port: port,
+            identity_file: None,
+        }
+    }
+
+    #[test]
+    fn same_pi_folders_skip_peer_ssh() {
+        let pi = remote_host("pi@raspberrypi.local", None);
+        let also = remote_host("pi@raspberrypi.local", Some(22));
+        let mode = remote_pair_mode(
+            &pi,
+            &also,
+            Path::new("/home/pi/photos"),
+            Path::new("/mnt/usb/backup"),
+        );
+        let Ok(mode) = mode else {
+            panic!("remote_pair_mode");
+        };
+        assert_eq!(mode, TransferMode::RemoteSameHost);
+    }
+
+    #[test]
+    fn same_folder_on_one_host_is_rejected() {
+        let pi = remote_host("pi@raspberrypi.local", None);
+        let err = remote_pair_mode(&pi, &pi, Path::new("/data/"), Path::new("/data"));
+        let Err(err) = err else {
+            panic!("expected same-folder error");
+        };
+        assert!(err.to_string().contains("same folder"), "{err}");
     }
 
     #[test]
