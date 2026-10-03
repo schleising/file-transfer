@@ -2,7 +2,7 @@
 
 **Status:** Implemented (personal-use **1.3.11**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
-Related: [Android LAN controller assessment](ANDROID.md) (not implemented). [Controller sleep / disconnect](SLEEP.md) (not implemented).
+Related: [Android LAN controller assessment](ANDROID.md) (not implemented). [Controller sleep / disconnect](SLEEP.md) (not implemented). [Same-volume hard links](HARDLINK.md) (not implemented).
 
 ## 1. Overview
 
