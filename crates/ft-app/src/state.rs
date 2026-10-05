@@ -922,6 +922,8 @@ impl AppState {
     fn remember_job_end(&mut self, last: LastTransfer) {
         self.status_line = match &last {
             LastTransfer::Complete { bytes } => {
+                #[cfg(target_os = "macos")]
+                crate::macos::notify_transfers_complete();
                 format!("Transfer complete ({})", format_bytes(*bytes))
             }
             LastTransfer::Failed(e) => format!("Transfer failed: {e}"),

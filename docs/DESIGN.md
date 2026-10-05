@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.3.11**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
+**Status:** Implemented (personal-use **1.4.0**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
 Related: [Android LAN controller assessment](ANDROID.md) (not implemented). [Controller sleep / disconnect](SLEEP.md) (not implemented). [Same-volume hard links](HARDLINK.md) (not implemented).
 
@@ -169,7 +169,7 @@ There is no native `rfd` folder dialog.
 3. **Destination** — pick a saved folder (or add one).
 4. When source, files, and destination are all set, preflight runs automatically. **Access status** updates in the sidebar.
 5. **Transfer** reuses the cached preflight plan (no second folder expand) → progress bar with rate and ETA; **Cancel** kills the local ssh/rsync child.
-6. UI shows **Transfer complete** as soon as rsync reports payload done (see §8); SSH teardown continues in the background.
+6. UI shows **Transfer complete** as soon as rsync reports payload done (see §8); SSH teardown continues in the background. On success, macOS shows a notification titled **File Transfer** whose body is only **All transfers complete**. It does not name files, folders, hosts, or sizes. Failure and cancel do not notify. The first success asks for notification permission.
 7. **Five seconds** after the job ends (success, failure, or cancel), the same plan wipe as **Reset** runs unless the user interacts first (tab, selection, Add Location, Transfer, or Reset). Reset during the wait still runs immediately.
 8. After that wipe the footer is **Ready**. Sidebar **Last transfer** stays **Complete** / **Failed** / **Cancelled** (session-only). **Reset** sets Last transfer to **None**.
 
@@ -326,7 +326,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 
 - Trust model = existing SSH credentials.
 - Remote commands built with careful quoting (`shell_quote`); listing prefers Python argv path.
-- No filename logging.
+- No filename logging. The completion notification is a fixed sentence and carries no transfer details.
 - Overwrite / free-space confirmation UI: **not** fully built in v1 (rsync default overwrite behavior applies).
 - Redacted command details panel: **not** built in v1.
 

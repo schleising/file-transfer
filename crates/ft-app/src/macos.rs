@@ -1,6 +1,7 @@
 //! macOS menubar extra, login-item, and launch visibility.
 
 use crate::state::AppState;
+use block2::RcBlock;
 use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::trayicon::menu::{
     CheckMenuItem, ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem,
@@ -15,7 +16,7 @@ use dioxus::desktop::{
 use dioxus::prelude::*;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
-use objc2::{msg_send, sel, MainThreadMarker};
+use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker};
 use objc2_app_kit::NSMenu;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,6 +26,138 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AGENT_LABEL: &str = "local.file-transfer";
 const INSTALLED_APP: &str = "/Applications/File Transfer.app";
+
+#[link(name = "UserNotifications", kind = "framework")]
+extern "C" {}
+
+// Banner and Notification Center list. No sound. No file, path, or size text.
+const PRESENT_BANNER_AND_LIST: usize = (1 << 3) | (1 << 4);
+const AUTH_ALERT: usize = 1 << 2;
+
+define_class!(
+    #[unsafe(super(objc2::runtime::NSObject))]
+    #[name = "FTTransferNotificationDelegate"]
+    struct TransferNotificationDelegate;
+
+    impl TransferNotificationDelegate {
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        fn will_present(
+            &self,
+            _center: *mut AnyObject,
+            _notification: *mut AnyObject,
+            handler: &block2::Block<dyn Fn(usize)>,
+        ) {
+            handler.call((PRESENT_BANNER_AND_LIST,));
+        }
+    }
+);
+
+/// Fixed text only. The banner never names a file, folder, host, or size.
+pub fn notify_transfers_complete() {
+    let Some(content) = notification_content("File Transfer", "All transfers complete") else {
+        return;
+    };
+    let Some(center) = notification_center() else {
+        return;
+    };
+    if let Some(delegate) = notification_delegate() {
+        unsafe {
+            let _: () = msg_send![&*center, setDelegate: &*delegate];
+        }
+    }
+    let post = RcBlock::new(move |granted: Bool, _error: *mut AnyObject| {
+        if !granted.as_bool() {
+            return;
+        }
+        let Some(request) = notification_request(&content) else {
+            return;
+        };
+        let Some(center) = notification_center() else {
+            return;
+        };
+        let done = RcBlock::new(|_error: *mut AnyObject| {});
+        unsafe {
+            let _: () = msg_send![&*center, addNotificationRequest: &*request, withCompletionHandler: &*done];
+        }
+    });
+    unsafe {
+        let _: () = msg_send![
+            &*center,
+            requestAuthorizationWithOptions: AUTH_ALERT,
+            completionHandler: &*post
+        ];
+    }
+}
+
+fn notification_center() -> Option<Retained<AnyObject>> {
+    unsafe {
+        let cls = AnyClass::get(c"UNUserNotificationCenter")?;
+        let center: *mut AnyObject = msg_send![cls, currentNotificationCenter];
+        if center.is_null() {
+            None
+        } else {
+            Some(Retained::retain(center)?)
+        }
+    }
+}
+
+fn notification_delegate() -> Option<Retained<TransferNotificationDelegate>> {
+    use std::sync::OnceLock;
+    static DELEGATE: OnceLock<Option<Retained<TransferNotificationDelegate>>> = OnceLock::new();
+    DELEGATE
+        .get_or_init(|| unsafe {
+            let obj: *mut AnyObject = msg_send![TransferNotificationDelegate::class(), new];
+            Retained::from_raw(obj.cast())
+        })
+        .clone()
+}
+
+fn notification_content(title: &str, body: &str) -> Option<Retained<AnyObject>> {
+    let title = ns_string(title)?;
+    let body = ns_string(body)?;
+    unsafe {
+        let cls = AnyClass::get(c"UNMutableNotificationContent")?;
+        let content: *mut AnyObject = msg_send![cls, new];
+        if content.is_null() {
+            return None;
+        }
+        let content = Retained::from_raw(content)?;
+        let _: () = msg_send![&*content, setTitle: &*title];
+        let _: () = msg_send![&*content, setBody: &*body];
+        Some(content)
+    }
+}
+
+fn notification_request(content: &Retained<AnyObject>) -> Option<Retained<AnyObject>> {
+    let ident = ns_string("transfers-complete")?;
+    unsafe {
+        let cls = AnyClass::get(c"UNNotificationRequest")?;
+        let request: *mut AnyObject = msg_send![
+            cls,
+            requestWithIdentifier: &*ident,
+            content: &**content,
+            trigger: std::ptr::null::<AnyObject>()
+        ];
+        if request.is_null() {
+            None
+        } else {
+            Some(Retained::retain(request)?)
+        }
+    }
+}
+
+fn ns_string(text: &str) -> Option<Retained<AnyObject>> {
+    let c = std::ffi::CString::new(text).ok()?;
+    unsafe {
+        let cls = AnyClass::get(c"NSString")?;
+        let obj: *mut AnyObject = msg_send![cls, stringWithUTF8String: c.as_ptr()];
+        if obj.is_null() {
+            None
+        } else {
+            Retained::retain(obj)
+        }
+    }
+}
 
 unsafe extern "C" {
     fn getuid() -> u32;
