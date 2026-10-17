@@ -203,7 +203,7 @@ pub fn attach_menubar() {
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(false);
         if let Some(icon) = menubar_icon() {
-            builder = builder.with_icon(icon).with_icon_as_template(true);
+            builder = builder.with_icon_templated(icon);
         }
         let tray = builder.build().ok();
         (Rc::new(open_at_login), Rc::new(quit), tray, menu)
@@ -227,7 +227,7 @@ pub fn attach_menubar() {
         } else {
             menubar_icon()
         } {
-            let _ = tray.set_icon_with_as_template(Some(icon), true);
+            let _ = tray.set_icon_templated(Some(icon));
         }
         let _ = tray.set_tooltip(Some(if transferring {
             "File Transfer — transferring"
