@@ -1182,7 +1182,7 @@ fn FolderBrowserSheet() -> Element {
                                 }
                             },
                             onkeydown: move |e| {
-                                if e.key() == Key::Enter {
+                                if e.key() == Key::Named(NamedKey::Enter) {
                                     state.write().browser_create_folder();
                                 }
                             },
