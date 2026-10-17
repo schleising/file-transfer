@@ -28,6 +28,9 @@ sign_app() {
   fi
 }
 
+echo "Updating dependencies..."
+cargo update
+
 echo "Building release binary..."
 cargo build --release -p ft-app
 
