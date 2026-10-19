@@ -109,5 +109,15 @@ rm -rf "$DEST"
 cp -R "$APP_DIR" "$DEST"
 touch "$DEST"
 sign_app "$DEST"
+
+# Launch Services lists every .app it has seen. The build-tree copy shares this
+# bundle id, so it shows up in the Applications menu beside /Applications.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -u "$APP_DIR" || true
+  "$LSREGISTER" -f "$DEST" || true
+fi
+rm -rf "$APP_DIR"
+
 echo "Installed to ${DEST}"
 echo "On first launch, allow File Transfer under System Settings → Privacy & Security → Local Network."
