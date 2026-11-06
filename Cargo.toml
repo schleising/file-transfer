@@ -27,5 +27,5 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 dirs = "7.0.0"
 dioxus = { version = "0.8.0-alpha.3", features = ["desktop"] }
 futures-timer = "3.0.4"
-rusqlite = { version = "0.41.0", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 uuid = { version = "1.29.0", features = ["v4"] }
