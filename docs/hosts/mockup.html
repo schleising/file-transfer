@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Hosts page mockups</title>
+  <link rel="stylesheet" href="../../crates/ft-app/assets/macos.css" />
+  <style>
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: light;
+        --accent: #007aff;
+        --accent-active: #0066d6;
+        --ok: #34c759;
+        --err: #ff3b30;
+        --sidebar: #f5f5f7;
+        --sidebar-hover: rgba(0, 0, 0, 0.05);
+        --sidebar-selected: rgba(0, 0, 0, 0.08);
+        --content: #ffffff;
+        --footer: #f7f7f8;
+        --label: #1d1d1f;
+        --secondary: #6e6e73;
+        --tertiary: #86868b;
+        --separator: rgba(0, 0, 0, 0.1);
+        --hairline: rgba(0, 0, 0, 0.12);
+        --control: rgba(0, 0, 0, 0.06);
+        --control-hover: rgba(0, 0, 0, 0.09);
+        --control-active: rgba(0, 0, 0, 0.14);
+        --field: rgba(255, 255, 255, 0.9);
+        --field-border: rgba(0, 0, 0, 0.18);
+        --tile: #ffffff;
+        --tile-border: rgba(0, 0, 0, 0.1);
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 0 0 0.5px var(--hairline);
+        --sheet-shadow: 0 22px 70px rgba(0, 0, 0, 0.28);
+        --focus: color-mix(in srgb, var(--accent) 28%, transparent);
+        --row-hover: rgba(0, 0, 0, 0.04);
+        --row-selected: color-mix(in srgb, var(--accent) 16%, transparent);
+      }
+    }
+
+    html, body { height: auto; overflow: auto; background: #d8d8dc; }
+    body { margin: 0; padding: 28px; display: flex; flex-direction: column; gap: 28px; }
+    .frame {
+      width: 1280px;
+      height: 840px;
+      position: relative;
+      overflow: hidden;
+      border-radius: 12px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.18);
+      background: white;
+    }
+    .lights {
+      position: absolute;
+      top: 18px;
+      left: 20px;
+      display: flex;
+      gap: 8px;
+      z-index: 40;
+    }
+    .lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+    .lights .r { background: #ff5f57; }
+    .lights .y { background: #febc2e; }
+    .lights .g { background: #28c840; }
+    .brand-mark.mock {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: linear-gradient(180deg, #3d9bff, #007aff);
+      color: white;
+      display: grid;
+      place-items: center;
+    }
+    .brand-mark.mock svg { width: 16px; height: 16px; }
+    .nav-sep { height: 0.5px; background: var(--separator); margin: 8px 8px; }
+
+    .hosts-split {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 16px;
+      padding-bottom: 16px;
+    }
+    .hosts-card {
+      border: 0.5px solid var(--hairline);
+      border-radius: 10px;
+      background: var(--content);
+      box-shadow: var(--shadow);
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .host-row {
+      display: grid;
+      grid-template-columns: 12px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      width: 100%;
+      text-align: left;
+      border: 0;
+      border-bottom: 0.5px solid var(--separator);
+      background: transparent;
+      padding: 10px 12px;
+      color: inherit;
+      font: inherit;
+    }
+    .host-row.is-selected { background: var(--row-selected); }
+    .host-row.add-row { grid-template-columns: 16px 1fr; color: var(--accent); font-weight: 510; }
+    .host-row.add-row svg { width: 14px; height: 14px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.18); }
+    .host-name { font-weight: 600; font-size: 13px; }
+    .host-sub { color: var(--secondary); font-size: 12px; margin-top: 1px; }
+    .host-meta { color: var(--tertiary); font-size: 11px; }
+    .hosts-split { align-items: start; }
+    .disc { border-top: 0.5px solid var(--separator); padding: 12px 12px 8px; }
+    .disc h4 {
+      margin: 0 0 6px;
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--tertiary);
+    }
+    .disc-row { padding: 6px 0; }
+    .disc-row svg { color: var(--secondary); }
+    .editor { padding: 18px 18px 16px; gap: 0; }
+    .editor .field { max-width: 420px; }
+    .port-field { max-width: 120px; }
+    .swatches { display: flex; gap: 10px; margin: 2px 0 14px; }
+    .swatch {
+      width: 22px; height: 22px; border-radius: 50%; border: 0; padding: 0;
+      background: var(--c);
+      box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.16);
+    }
+    .swatch.is-on { box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--c); }
+    .net-line {
+      display: flex; align-items: center; gap: 6px;
+      color: var(--ok); font-size: 12px; font-weight: 550; margin: 2px 0 8px;
+    }
+    .net-line i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: block; }
+    .editor-note { color: var(--secondary); font-size: 12px; margin: 0 0 12px; max-width: 440px; }
+    .editor-actions {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 14px;
+    }
+    .editor-actions .grow { flex: 1; }
+    .btn-quiet-danger { background: transparent; color: var(--err); }
+    .btn-fill-danger { background: var(--err); color: #fff; }
+    .confirm {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--err) 8%, var(--sidebar));
+    }
+    .confirm p { margin: 0; flex: 1; font-size: 13px; }
+    .lock-note { color: var(--secondary); font-size: 12px; margin: -8px 0 14px; }
+  </style>
+</head>
+<body>
+  <div id="today" class="frame"></div>
+  <div id="edit" class="frame"></div>
+  <div id="del" class="frame"></div>
+  <div id="add" class="frame"></div>
+  <div id="source" class="frame"></div>
+  <script>
+    const PATHS = {
+      computer: '<rect x="4" y="5" width="16" height="11" rx="2"/><path d="M9 20h6M12 16v4"/>',
+      folder: '<path d="M3.5 8.5A2 2 0 0 1 5.5 6.5h3.2l1.6 1.7h8.2a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
+      document: '<path d="M7 4.5h7l4 4V19a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 19V6A1.5 1.5 0 0 1 7 4.5z"/><path d="M14 4.5V9h4.5"/><path d="M8.5 13h7M8.5 16.5h5"/>',
+      network: '<circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="5.2" r="1.4"/><circle cx="6.2" cy="16.2" r="1.4"/><circle cx="17.8" cy="16.2" r="1.4"/><path d="M12 10.4V6.8M10.7 13.1 7.3 15.4M13.3 13.1l3.4 2.3"/>',
+      help: '<circle cx="12" cy="12" r="8"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.4-3 4"/><circle cx="12" cy="17" r="0.9" fill="currentColor" stroke="none"/>',
+      plus: '<path d="M12 5v14M5 12h14"/>',
+    };
+    const icon = (name) => `<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${PATHS[name]}</svg>`;
+
+    const PALETTE = ["#007AFF", "#FF9500", "#34C759", "#AF52DE", "#FF2D55", "#5AC8FA", "#FFCC00", "#A2845E"];
+
+    function lights() {
+      return `<div class="lights"><i class="r"></i><i class="y"></i><i class="g"></i></div>`;
+    }
+
+    function sidebar(selected, hostsNav) {
+      const item = (id, glyph, label) => {
+        const on = selected === id ? " is-selected" : "";
+        return `<button class="nav-item${on}">${icon(glyph)}<span>${label}</span></button>`;
+      };
+      const hosts = hostsNav
+        ? `<div class="nav-sep"></div>${item("hosts", "network", "Hosts")}`
+        : "";
+      return `
+        <aside class="sidebar">
+          <div class="sidebar-traffic"></div>
+          <div class="brand">
+            <div class="brand-mark mock">${icon("computer")}</div>
+            <div class="brand-text">
+              <h1>File Transfer</h1>
+              <div class="brand-version"><span>v1.4.2</span></div>
+            </div>
+          </div>
+          <nav class="nav">
+            ${item("source", "computer", "Source")}
+            ${item("files", "document", "Files")}
+            ${item("dest", "folder", "Destination")}
+            ${hosts}
+          </nav>
+          <div class="sidebar-panel">
+            <div class="sidebar-panel-title">Summary</div>
+            <div class="access-row"><span class="access-k">Source Host</span><span class="access-v">Studio</span></div>
+            <div class="access-row"><span class="access-k">Source Folder</span><span class="access-v">Photos</span></div>
+            <div class="access-row"><span class="access-k">Files</span><span class="access-v">12 items</span></div>
+            <div class="access-row"><span class="access-k">Destination Host</span><span class="access-v">Pi</span></div>
+            <div class="access-row"><span class="access-k">Destination Folder</span><span class="access-v">incoming</span></div>
+            <div class="access-status-block">
+              <div class="sidebar-panel-title">Access status</div>
+              <div class="access-status-line">
+                <span class="access-status">${icon("help")}</span>
+                <span class="access-status-text">Untested</span>
+              </div>
+            </div>
+            <div class="access-status-block">
+              <div class="sidebar-panel-title">Last transfer</div>
+              <div class="access-status-line">
+                <span class="access-status">${icon("help")}</span>
+                <span class="access-status-text">None</span>
+              </div>
+            </div>
+          </div>
+          <div class="sidebar-spacer"></div>
+          <button class="btn sidebar-reset">Reset</button>
+          <div class="sidebar-foot">Direct rsync over SSH</div>
+        </aside>`;
+    }
+
+    function footer() {
+      return `
+        <footer class="footer">
+          <div class="footer-row">
+            <div class="footer-status"><span>Ready</span></div>
+            <div class="footer-actions">
+              <button class="btn btn-primary" disabled>Transfer</button>
+            </div>
+          </div>
+          <div class="progress-meta"></div>
+          <div class="progress-track"><div class="progress-fill" style="width:0%"></div></div>
+        </footer>`;
+    }
+
+    function tile(host, name, selected) {
+      const sel = selected ? " is-selected" : "";
+      return `
+        <div class="tile${sel}">
+          <div class="tile-visual">
+            <div class="tile-icon">${icon("folder")}</div>
+            <div class="tile-name">${name}</div>
+          </div>
+        </div>`;
+    }
+
+    function addTile() {
+      return `
+        <button class="tile tile-add" type="button">
+          <div class="tile-visual">
+            <div class="tile-icon">${icon("plus")}</div>
+            <div class="tile-name">Add folder</div>
+          </div>
+        </button>`;
+    }
+
+    function hostBlock(name, color, tiles) {
+      return `
+        <div class="host-block" style="--host:${color}">
+          <div class="host-label">${icon("computer")}<span>${name}</span><div class="host-rule"></div></div>
+          <div class="tiles">${tiles}</div>
+        </div>`;
+    }
+
+    function sourceMain({ subtitle, addButton, wizard }) {
+      return `
+        <div class="main">
+          <div class="page">
+            <header class="page-header">
+              <div>
+                <h2>Source</h2>
+                <p>${subtitle}</p>
+              </div>
+              ${addButton ? `<button class="btn btn-primary">Add Location</button>` : ""}
+            </header>
+            <div class="page-scroll">
+              ${hostBlock("Studio", "#FF9500", tile("#FF9500", "Photos", true) + tile("#FF9500", "Camera", false) + addTile())}
+              ${hostBlock("Pi", "#34C759", tile("#34C759", "incoming", false) + addTile())}
+              ${hostBlock("This Mac", "#007AFF", tile("#007AFF", "Desktop", false) + addTile())}
+            </div>
+            ${wizard ? `<div class="wizard-bar"><button class="btn btn-primary">Continue</button></div>` : `<div class="wizard-bar"><button class="btn btn-primary">Continue</button></div>`}
+          </div>
+          ${footer()}
+        </div>`;
+    }
+
+    function swatches(on) {
+      return `<div class="swatches">${PALETTE.map((c) =>
+        `<button class="swatch${c === on ? " is-on" : ""}" style="--c:${c}" type="button"></button>`
+      ).join("")}</div>`;
+    }
+
+    function savedRow({ color, name, sub, meta, selected, add }) {
+      if (add) {
+        return `<button class="host-row add-row${selected ? " is-selected" : ""}">${icon("plus")}<span>Add host manually</span></button>`;
+      }
+      return `
+        <button class="host-row${selected ? " is-selected" : ""}">
+          <span class="dot" style="background:${color}"></span>
+          <span><div class="host-name">${name}</div><div class="host-sub">${sub}</div></span>
+          <span class="host-meta">${meta}</span>
+        </button>`;
+    }
+
+    function discovered() {
+      const row = (label) => `
+        <div class="discovered-row disc-row">
+          ${icon("network")}
+          <span>${label}</span>
+          <button class="btn">Add</button>
+        </div>`;
+      return `
+        <div class="disc">
+          <h4>Discovered on network</h4>
+          <div class="discovered">
+            ${row("office-nas — office-nas.local:22")}
+            ${row("linux-box — linux-box.local:22")}
+          </div>
+        </div>`;
+    }
+
+    function list(selectedAdd) {
+      return `
+        <div class="hosts-card list-card">
+          <div class="saved">
+            ${savedRow({ color: "#007AFF", name: "This Mac", sub: "This Mac", meta: "1 folder" })}
+            ${savedRow({ color: "#34C759", name: "Pi", sub: "pi@pi.local", meta: "1 folder" })}
+            ${savedRow({ color: "#FF9500", name: "Studio", sub: "steve@studio.local", meta: "2 folders", selected: !selectedAdd })}
+            ${savedRow({ add: true, selected: selectedAdd })}
+          </div>
+          ${discovered()}
+        </div>`;
+    }
+
+    function editorEdit() {
+      return `
+        <div class="hosts-card editor">
+          <div class="field"><label>Display name</label><input type="text" value="Studio" /></div>
+          <div class="field"><label>SSH destination</label><input type="text" value="steve@studio.local" /></div>
+          <div class="field port-field"><label>Port</label><input type="text" placeholder="22" /></div>
+          <div class="field-label">Colour</div>
+          ${swatches("#FF9500")}
+          <div class="net-line"><i></i>On network</div>
+          <div class="editor-actions">
+            <button class="btn btn-quiet-danger">Delete Host</button>
+            <span class="grow"></span>
+            <button class="btn btn-primary">Save</button>
+          </div>
+        </div>`;
+    }
+
+    function editorDelete() {
+      return `
+        <div class="hosts-card editor">
+          <div class="field"><label>Display name</label><input type="text" value="Studio" /></div>
+          <div class="field"><label>SSH destination</label><input type="text" value="steve@studio.local" /></div>
+          <div class="field port-field"><label>Port</label><input type="text" placeholder="22" /></div>
+          <div class="field-label">Colour</div>
+          ${swatches("#FF9500")}
+          <div class="net-line"><i></i>On network</div>
+          <div class="confirm">
+            <p>Delete Studio? Its 2 saved folders will be removed.</p>
+            <button class="btn">Cancel</button>
+            <button class="btn btn-fill-danger">Delete</button>
+          </div>
+        </div>`;
+    }
+
+    function editorNew() {
+      return `
+        <div class="hosts-card editor">
+          <p class="editor-note">Name the computer and the SSH destination you already use in Terminal.</p>
+          <div class="field"><label>Display name</label><input type="text" placeholder="Studio" /></div>
+          <div class="field"><label>SSH destination</label><input type="text" placeholder="user@host" /></div>
+          <div class="field port-field"><label>Port</label><input type="text" placeholder="22" /></div>
+          <div class="field-label">Colour</div>
+          ${swatches("#AF52DE")}
+          <div class="editor-actions">
+            <span class="grow"></span>
+            <button class="btn btn-primary" disabled>Add Host</button>
+          </div>
+        </div>`;
+    }
+
+    function hostsPage(editor, selectedAdd) {
+      return `
+        ${lights()}
+        <div class="app">
+          ${sidebar("hosts", true)}
+          <div class="main">
+            <div class="page">
+              <header class="page-header">
+                <div>
+                  <h2>Hosts</h2>
+                  <p>Add, edit, or remove computers used for transfer.</p>
+                </div>
+              </header>
+              <div class="hosts-split">
+                ${list(selectedAdd)}
+                ${editor}
+              </div>
+            </div>
+            ${footer()}
+          </div>
+        </div>`;
+    }
+
+    function sheet() {
+      return `
+        <div class="backdrop">
+          <div class="sheet">
+            <h3>New Source Location</h3>
+            <p class="sheet-sub">Select where the folder lives, then choose a path.</p>
+            <div class="field-label">Host</div>
+            <div class="chips">
+              <button class="chip">This Mac (This Mac)</button>
+              <button class="chip is-selected">Studio</button>
+              <button class="chip">Pi</button>
+            </div>
+            <div class="field-label" style="margin-top:14px">Discovered on Network</div>
+            <div class="discovered">
+              <div class="discovered-row">
+                ${icon("network")}
+                <span>office-nas — office-nas.local:22</span>
+                <button class="btn">Add Host</button>
+              </div>
+            </div>
+            <button class="disclosure">Add host manually</button>
+            <div class="section-gap"></div>
+            <div class="field-label">Folder</div>
+            <div class="path-row"><input type="text" placeholder="absolute path…" /></div>
+            <div class="sheet-actions">
+              <button class="btn">Cancel</button>
+              <button class="btn">${icon("folder")} Browse…</button>
+              <button class="btn btn-primary">Use Path</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    document.getElementById("today").innerHTML =
+      lights() + `<div class="app">${sidebar("source", false)}${sourceMain({
+        subtitle: "Choose a saved location, or add a new one.",
+        addButton: true,
+      })}</div>` + sheet();
+
+    document.getElementById("edit").innerHTML = hostsPage(editorEdit(), false);
+    document.getElementById("del").innerHTML = hostsPage(editorDelete(), false);
+    document.getElementById("add").innerHTML = hostsPage(editorNew(), true);
+    document.getElementById("source").innerHTML =
+      lights() + `<div class="app">${sidebar("source", true)}${sourceMain({
+        subtitle: "Choose a saved folder.",
+        addButton: false,
+      })}</div>`;
+
+    const only = new URLSearchParams(location.search).get("only");
+    if (only) {
+      document.body.style.padding = "0";
+      document.body.style.gap = "0";
+      document.body.style.background = "#fff";
+      for (const frame of document.querySelectorAll(".frame")) {
+        if (frame.id !== only) {
+          frame.remove();
+        } else {
+          frame.style.borderRadius = "0";
+          frame.style.boxShadow = "none";
+        }
+      }
+    }
+  </script>
+</body>
+</html>
