@@ -43,6 +43,8 @@ pub struct Computer {
     pub identity_file: Option<PathBuf>,
     pub bonjour_name: Option<String>,
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// Palette hex chosen on the Hosts page. `None` keeps the colour derived from `id`.
+    pub color: Option<String>,
     pub is_local: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -114,6 +116,7 @@ impl Store {
             "#,
         )?;
         self.migrate_locations_sort_order()?;
+        self.migrate_computer_color()?;
         Ok(())
     }
 
@@ -171,6 +174,19 @@ impl Store {
         Ok(())
     }
 
+    fn migrate_computer_color(&self) -> Result<()> {
+        let has_column: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('computers') WHERE name = 'color'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_column == 0 {
+            self.conn
+                .execute("ALTER TABLE computers ADD COLUMN color TEXT", [])?;
+        }
+        Ok(())
+    }
+
     fn ensure_local_computer(&self) -> Result<()> {
         let exists: Option<String> = self
             .conn
@@ -224,7 +240,7 @@ impl Store {
 
     pub fn computers(&self) -> Result<Vec<Computer>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, ssh_destination, ssh_port, identity_file, bonjour_name, last_seen_at, is_local, created_at, updated_at
+            "SELECT id, name, ssh_destination, ssh_port, identity_file, bonjour_name, last_seen_at, is_local, created_at, updated_at, color
              FROM computers ORDER BY is_local DESC, name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -239,6 +255,7 @@ impl Store {
                 is_local: row.get::<_, i64>(7)? != 0,
                 created_at: parse_time(&row.get::<_, String>(8)?)?,
                 updated_at: parse_time(&row.get::<_, String>(9)?)?,
+                color: row.get(10)?,
             })
         })?;
         collect_mapped(rows)
@@ -246,8 +263,8 @@ impl Store {
 
     pub fn upsert_computer(&self, c: &Computer) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO computers (id, name, ssh_destination, ssh_port, identity_file, bonjour_name, last_seen_at, is_local, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO computers (id, name, ssh_destination, ssh_port, identity_file, bonjour_name, last_seen_at, is_local, created_at, updated_at, color)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
                 ssh_destination=excluded.ssh_destination,
@@ -256,7 +273,8 @@ impl Store {
                 bonjour_name=excluded.bonjour_name,
                 last_seen_at=excluded.last_seen_at,
                 is_local=excluded.is_local,
-                updated_at=excluded.updated_at",
+                updated_at=excluded.updated_at,
+                color=excluded.color",
             params![
                 c.id.to_string(),
                 c.name,
@@ -268,6 +286,7 @@ impl Store {
                 c.is_local as i64,
                 c.created_at.to_rfc3339(),
                 c.updated_at.to_rfc3339(),
+                c.color,
             ],
         )?;
         Ok(())
@@ -334,6 +353,30 @@ impl Store {
             params![id.to_string()],
         )?;
         Ok(())
+    }
+
+    /// Remove a remote computer and the folders saved on it. This Mac is refused.
+    pub fn delete_computer(&self, id: Uuid) -> Result<bool> {
+        let is_local: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT is_local FROM computers WHERE id = ?1",
+                params![id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if is_local != Some(0) {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "DELETE FROM locations WHERE computer_id = ?1",
+            params![id.to_string()],
+        )?;
+        let removed = self.conn.execute(
+            "DELETE FROM computers WHERE id = ?1 AND is_local = 0",
+            params![id.to_string()],
+        )?;
+        Ok(removed > 0)
     }
 }
 
@@ -405,6 +448,7 @@ mod tests {
             identity_file: None,
             bonjour_name: Some("nas.local".into()),
             last_seen_at: None,
+            color: Some("#FF9500".into()),
             is_local: false,
             created_at: now,
             updated_at: now,
@@ -423,6 +467,19 @@ mod tests {
         };
         must(store.upsert_location(&loc));
         assert_eq!(must(store.locations_for(remote.id)).len(), 1);
+        let saved = must(store.computers())
+            .into_iter()
+            .find(|c| c.id == remote.id);
+        let Some(saved) = saved else {
+            panic!("saved computer missing");
+        };
+        assert_eq!(saved.color.as_deref(), Some("#FF9500"));
+
+        assert!(must(store.delete_computer(remote.id)));
+        assert!(must(store.computers()).iter().all(|c| c.id != remote.id));
+        assert!(must(store.locations_for(remote.id)).is_empty());
+        assert!(!must(store.delete_computer(local.id)));
+        assert!(must(store.local_computer()).is_local);
     }
 
     #[test]

@@ -67,11 +67,95 @@ pub fn folder_display_name(path: &Path, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-pub fn host_color(computer_id: Uuid) -> &'static str {
-    const PALETTE: [&str; 8] = [
-        "#007AFF", "#FF9500", "#34C759", "#AF52DE", "#FF2D55", "#5AC8FA", "#FFCC00", "#A2845E",
-    ];
-    PALETTE[(computer_id.as_u128() as usize) % PALETTE.len()]
+pub const HOST_PALETTE: [&str; 8] = [
+    "#007AFF", "#FF9500", "#34C759", "#AF52DE", "#FF2D55", "#5AC8FA", "#FFCC00", "#A2845E",
+];
+
+pub fn host_color(computer_id: Uuid, stored: Option<&str>) -> &'static str {
+    if let Some(stored) = stored {
+        for color in HOST_PALETTE {
+            if stored.eq_ignore_ascii_case(color) {
+                return color;
+            }
+        }
+    }
+    HOST_PALETTE[(computer_id.as_u128() as usize) % HOST_PALETTE.len()]
+}
+
+/// First palette entry that is not already stored on a host. Falls back to blue.
+pub fn first_free_host_color<'a, I>(stored: I) -> &'static str
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let used: Vec<String> = stored
+        .into_iter()
+        .map(|color| color.to_ascii_lowercase())
+        .collect();
+    for color in HOST_PALETTE {
+        if !used
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(color))
+        {
+            return color;
+        }
+    }
+    HOST_PALETTE[0]
+}
+
+pub fn parse_port_field(raw: &str) -> Result<Option<u16>, ()> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(Some(port)),
+        _ => Err(()),
+    }
+}
+
+/// Host part of an SSH destination or discovered hostname, for Bonjour matching.
+pub fn ssh_host_key(destination: &str) -> String {
+    let host = match destination.trim().rsplit_once('@') {
+        Some((_, host)) => host.trim(),
+        None => destination.trim(),
+    };
+    let host = host.trim_end_matches('.');
+    let host = match host.strip_suffix(".local") {
+        Some(stripped) => stripped,
+        None => host,
+    };
+    host.to_ascii_lowercase()
+}
+
+fn port_key(port: Option<u16>) -> u16 {
+    match port {
+        None | Some(22) => 22,
+        Some(port) => port,
+    }
+}
+
+pub fn endpoints_match(
+    dest_a: &str,
+    port_a: Option<u16>,
+    dest_b: &str,
+    port_b: Option<u16>,
+) -> bool {
+    dest_a == dest_b && port_key(port_a) == port_key(port_b)
+}
+
+pub fn discovery_matches(
+    bonjour_name: Option<&str>,
+    ssh_destination: &str,
+    ssh_port: Option<u16>,
+    service_name: &str,
+    discovered_host: &str,
+    discovered_port: u16,
+) -> bool {
+    if bonjour_name.is_some_and(|name| name.eq_ignore_ascii_case(service_name)) {
+        return true;
+    }
+    ssh_host_key(ssh_destination) == ssh_host_key(discovered_host)
+        && port_key(ssh_port) == port_key(Some(discovered_port))
 }
 
 pub fn progress_fraction(progress: &ft_exec::Progress, transferring: bool) -> f32 {
@@ -148,5 +232,76 @@ pub fn status_kind(status_line: &str, transferring: bool) -> &'static str {
         "err"
     } else {
         "idle"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_color_uses_stored_palette_or_hash() {
+        let id = Uuid::nil();
+        assert_eq!(host_color(id, Some("#ff9500")), "#FF9500");
+        assert_eq!(host_color(id, Some("nope")), host_color(id, None));
+    }
+
+    #[test]
+    fn first_free_skips_stored_colours() {
+        assert_eq!(first_free_host_color(["#007AFF", "#ff9500"]), "#34C759");
+        assert_eq!(first_free_host_color(HOST_PALETTE), "#007AFF");
+    }
+
+    #[test]
+    fn port_field_accepts_empty_and_rejects_zero() {
+        assert_eq!(parse_port_field("  "), Ok(None));
+        assert_eq!(parse_port_field("22"), Ok(Some(22)));
+        assert_eq!(parse_port_field("0"), Err(()));
+        assert_eq!(parse_port_field("ssh"), Err(()));
+    }
+
+    #[test]
+    fn ssh_host_key_strips_user_and_local() {
+        assert_eq!(ssh_host_key("steve@studio.local"), "studio");
+        assert_eq!(ssh_host_key("studio.local."), "studio");
+        assert_eq!(ssh_host_key("studio"), "studio");
+    }
+
+    #[test]
+    fn discovery_matches_bonjour_name_or_host_and_port() {
+        assert!(discovery_matches(
+            Some("office-nas"),
+            "alias",
+            None,
+            "Office-NAS",
+            "other.local",
+            22
+        ));
+        assert!(discovery_matches(
+            None,
+            "steve@studio.local",
+            None,
+            "Studio",
+            "studio.local",
+            22
+        ));
+        assert!(discovery_matches(
+            None,
+            "steve@studio.local",
+            Some(22),
+            "x",
+            "Studio.local.",
+            22
+        ));
+        assert!(!discovery_matches(
+            None,
+            "steve@studio.local",
+            Some(2222),
+            "Studio",
+            "studio.local",
+            22
+        ));
+        assert!(endpoints_match("nas", None, "nas", Some(22)));
+        assert!(!endpoints_match("nas", None, "other", Some(22)));
     }
 }

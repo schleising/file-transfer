@@ -1,6 +1,9 @@
 //! Toolkit-agnostic application state and background transfer jobs.
 
-use crate::util::{folder_display_name, format_bytes, truncate_err};
+use crate::util::{
+    discovery_matches, endpoints_match, first_free_host_color, folder_display_name, format_bytes,
+    host_color, parse_port_field, truncate_err,
+};
 use anyhow::Result;
 use chrono::Utc;
 use ft_exec::{self, DirEntry, HostRef, Progress, TransferPlan};
@@ -166,12 +169,13 @@ pub enum NavTab {
     Source,
     Files,
     Destination,
+    Hosts,
 }
 
 impl NavTab {
     pub fn prev(self) -> Option<Self> {
         match self {
-            NavTab::Source => None,
+            NavTab::Source | NavTab::Hosts => None,
             NavTab::Files => Some(NavTab::Source),
             NavTab::Destination => Some(NavTab::Files),
         }
@@ -181,7 +185,7 @@ impl NavTab {
         match self {
             NavTab::Source => Some(NavTab::Files),
             NavTab::Files => Some(NavTab::Destination),
-            NavTab::Destination => None,
+            NavTab::Destination | NavTab::Hosts => None,
         }
     }
 
@@ -190,16 +194,35 @@ impl NavTab {
             NavTab::Source => "Source",
             NavTab::Files => "Files",
             NavTab::Destination => "Destination",
+            NavTab::Hosts => "Hosts",
         }
     }
 
     pub fn subtitle(self) -> &'static str {
         match self {
-            NavTab::Source => "Choose a saved location, or add a new one.",
+            NavTab::Source => "Choose a saved folder.",
             NavTab::Files => "Select files and folders to copy.",
             NavTab::Destination => "Choose where the files should go.",
+            NavTab::Hosts => "Add, edit, or remove computers used for transfer.",
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HostFormTarget {
+    Existing(Uuid),
+    New,
+}
+
+#[derive(Clone)]
+pub struct HostForm {
+    pub target: HostFormTarget,
+    pub name: String,
+    pub ssh: String,
+    pub port: String,
+    pub color: String,
+    pub confirm_delete: bool,
+    pub message: String,
 }
 
 pub struct FolderBrowser {
@@ -211,13 +234,6 @@ pub struct FolderBrowser {
     pub loading: bool,
     pub error: Option<String>,
     pub new_folder_name: String,
-}
-
-pub struct LocationPicker {
-    pub side: Side,
-    pub computer_id: Option<Uuid>,
-    pub path_edit: String,
-    pub show_manual_host: bool,
 }
 
 pub struct AppState {
@@ -249,13 +265,9 @@ pub struct AppState {
     auto_reset_gen: u64,
     pub cancel: Arc<AtomicBool>,
 
-    pub new_name: String,
-    pub new_ssh: String,
-    pub new_port: String,
-    pub computer_msg: String,
+    pub host_form: Option<HostForm>,
 
     pub folder_browser: Option<FolderBrowser>,
-    pub location_picker: Option<LocationPicker>,
 
     bg: BgTx,
     rx: Receiver<BgMsg>,
@@ -301,12 +313,8 @@ impl AppState {
             last_transfer: None,
             auto_reset_gen: 0,
             cancel: Arc::new(AtomicBool::new(false)),
-            new_name: String::new(),
-            new_ssh: String::new(),
-            new_port: String::new(),
-            computer_msg: String::new(),
+            host_form: None,
             folder_browser: None,
-            location_picker: None,
             bg,
             rx,
         };
@@ -391,9 +399,54 @@ impl AppState {
         }
     }
 
-    pub fn close_location_picker(&mut self) {
-        self.location_picker = None;
+    fn leave_hosts(&mut self) {
         self.discovery = None;
+        self.host_form = None;
+    }
+
+    fn enter_hosts(&mut self) {
+        self.ensure_discovery();
+        self.select_fallback_host();
+    }
+
+    pub fn discovery_pending(&self) -> bool {
+        self.discovery
+            .as_ref()
+            .is_some_and(|discovery| !discovery.has_reported())
+    }
+
+    pub fn host_on_network(&self, computer_id: Uuid) -> bool {
+        let Some(computer) = self.computer(computer_id) else {
+            return false;
+        };
+        self.discovered_hosts().iter().any(|host| {
+            discovery_matches(
+                computer.bonjour_name.as_deref(),
+                &computer.ssh_destination,
+                computer.ssh_port,
+                &host.name,
+                &host.host,
+                host.port,
+            )
+        })
+    }
+
+    pub fn unmatched_discoveries(&self) -> Vec<DiscoveredHost> {
+        self.discovered_hosts()
+            .into_iter()
+            .filter(|host| {
+                !self.computers.iter().any(|computer| {
+                    discovery_matches(
+                        computer.bonjour_name.as_deref(),
+                        &computer.ssh_destination,
+                        computer.ssh_port,
+                        &host.name,
+                        &host.host,
+                        host.port,
+                    )
+                })
+            })
+            .collect()
     }
 
     pub fn location_groups(&self) -> Vec<(Computer, Vec<Location>)> {
@@ -575,13 +628,11 @@ impl AppState {
             BrowseTarget::Source => {
                 let id = self.ensure_location(computer_id, path);
                 self.apply_location_selection(Some(id), Side::Source);
-                self.close_location_picker();
                 self.start_list();
             }
             BrowseTarget::Dest => {
                 let id = self.ensure_location(computer_id, path);
                 self.apply_location_selection(Some(id), Side::Dest);
-                self.close_location_picker();
             }
         }
     }
@@ -955,7 +1006,7 @@ impl AppState {
         self.status_line.clear();
         self.cancel.store(false, Ordering::SeqCst);
         self.folder_browser = None;
-        self.close_location_picker();
+        self.leave_hosts();
         self.tab = NavTab::Source;
     }
 
@@ -984,8 +1035,19 @@ impl AppState {
 
     pub fn set_tab(&mut self, tab: NavTab) {
         self.note_user_activity();
+        if tab == self.tab {
+            if tab == NavTab::Files {
+                self.ensure_files_listed();
+            }
+            return;
+        }
+        if self.tab == NavTab::Hosts {
+            self.leave_hosts();
+        }
         self.tab = tab;
-        if tab == NavTab::Files {
+        if tab == NavTab::Hosts {
+            self.enter_hosts();
+        } else if tab == NavTab::Files {
             self.ensure_files_listed();
         }
     }
@@ -1008,6 +1070,7 @@ impl AppState {
             NavTab::Source => self.source_ready(),
             NavTab::Files => self.files_ready(),
             NavTab::Destination => true,
+            NavTab::Hosts => false,
         }
     }
 
@@ -1190,131 +1253,352 @@ impl AppState {
         }
     }
 
-    pub fn open_location_picker(&mut self, side: Side) {
+    pub fn select_host(&mut self, id: Uuid) {
+        self.note_user_activity();
+        if self.computer(id).is_some() {
+            self.load_host_form(id);
+        }
+    }
+
+    pub fn select_new_host(&mut self) {
         if self.selections_locked() {
             return;
         }
         self.note_user_activity();
-        let computer_id = match side {
-            Side::Source => self.source_computer,
-            Side::Dest => self.dest_computer,
-        }
-        .or_else(|| self.computers.iter().find(|c| c.is_local).map(|c| c.id))
-        .or_else(|| self.computers.first().map(|c| c.id));
-
-        self.location_picker = Some(LocationPicker {
-            side,
-            computer_id,
-            path_edit: String::new(),
-            show_manual_host: false,
+        let color = first_free_host_color(self.stored_palette_colors());
+        self.host_form = Some(HostForm {
+            target: HostFormTarget::New,
+            name: String::new(),
+            ssh: String::new(),
+            port: String::new(),
+            color: color.to_string(),
+            confirm_delete: false,
+            message: String::new(),
         });
-        self.computer_msg.clear();
-        self.ensure_discovery();
     }
 
-    pub fn picker_set_computer(&mut self, id: Uuid) {
-        if let Some(picker) = &mut self.location_picker {
-            picker.computer_id = Some(id);
+    pub fn set_host_name(&mut self, value: String) {
+        self.edit_host_field(|form| form.name = value);
+    }
+
+    pub fn set_host_ssh(&mut self, value: String) {
+        self.edit_host_field(|form| form.ssh = value);
+    }
+
+    pub fn set_host_port(&mut self, value: String) {
+        self.edit_host_field(|form| form.port = value);
+    }
+
+    pub fn set_host_color(&mut self, color: &str) {
+        let color = color.to_string();
+        self.edit_host_field(|form| form.color = color);
+    }
+
+    pub fn host_add_enabled(&self) -> bool {
+        if self.selections_locked() {
+            return false;
         }
+        let Some(form) = &self.host_form else {
+            return false;
+        };
+        if form.target != HostFormTarget::New {
+            return false;
+        }
+        !form.name.trim().is_empty()
+            && !form.ssh.trim().is_empty()
+            && parse_port_field(&form.port).is_ok()
+    }
+
+    pub fn host_save_enabled(&self) -> bool {
+        if self.selections_locked() {
+            return false;
+        }
+        let Some(form) = self.host_form.clone() else {
+            return false;
+        };
+        let HostFormTarget::Existing(id) = form.target else {
+            return false;
+        };
+        let Some(computer) = self.computer(id).cloned() else {
+            return false;
+        };
+        if form.name.trim().is_empty() || parse_port_field(&form.port).is_err() {
+            return false;
+        }
+        if !computer.is_local && form.ssh.trim().is_empty() {
+            return false;
+        }
+        host_record_dirty(&computer, &form)
     }
 
     pub fn add_discovered_host(&mut self, name: String, host: String, port: u16) {
+        if self.selections_locked() {
+            return;
+        }
+        self.note_user_activity();
+        if let Some(existing) = self.computers.iter().find(|computer| {
+            discovery_matches(
+                computer.bonjour_name.as_deref(),
+                &computer.ssh_destination,
+                computer.ssh_port,
+                &name,
+                &host,
+                port,
+            )
+        }) {
+            let id = existing.id;
+            self.load_host_form(id);
+            return;
+        }
         let now = Utc::now();
-        let bonjour = name.clone();
-        let c = Computer {
+        let color = first_free_host_color(self.stored_palette_colors()).to_string();
+        let computer = Computer {
             id: Uuid::new_v4(),
             name: name.clone(),
             ssh_destination: host,
             ssh_port: Some(port).filter(|&p| p != 22),
             identity_file: None,
-            bonjour_name: Some(bonjour),
+            bonjour_name: Some(name),
             last_seen_at: Some(now),
+            color: Some(color),
             is_local: false,
             created_at: now,
             updated_at: now,
         };
-        let _ = self.store.upsert_computer(&c);
-        if let Some(picker) = &mut self.location_picker {
-            picker.computer_id = Some(c.id);
+        if self.store.upsert_computer(&computer).is_err() {
+            self.set_host_message("Could not save host.");
+            return;
         }
+        let id = computer.id;
         self.reload_store();
-        self.computer_msg = format!("Added host {name}");
+        self.load_host_form(id);
     }
 
     pub fn add_manual_host(&mut self) {
+        if !self.host_add_enabled() {
+            return;
+        }
+        self.note_user_activity();
+        let Some(form) = self.host_form.clone() else {
+            return;
+        };
+        let Ok(port) = parse_port_field(&form.port) else {
+            return;
+        };
+        let name = form.name.trim().to_string();
+        let ssh = form.ssh.trim().to_string();
+        if self.endpoint_taken(&ssh, port, None) {
+            self.set_host_message("That host is already saved.");
+            return;
+        }
         let now = Utc::now();
-        let port = self.new_port.trim().parse().ok();
-        let c = Computer {
+        let computer = Computer {
             id: Uuid::new_v4(),
-            name: self.new_name.trim().to_string(),
-            ssh_destination: self.new_ssh.trim().to_string(),
+            name,
+            ssh_destination: ssh,
             ssh_port: port,
             identity_file: None,
             bonjour_name: None,
             last_seen_at: None,
+            color: Some(form.color),
             is_local: false,
             created_at: now,
             updated_at: now,
         };
-        if c.name.is_empty() || c.ssh_destination.is_empty() {
-            self.computer_msg = "Name and SSH destination required".into();
-        } else {
-            let _ = self.store.upsert_computer(&c);
-            if let Some(picker) = &mut self.location_picker {
-                picker.computer_id = Some(c.id);
-            }
-            self.new_name.clear();
-            self.new_ssh.clear();
-            self.new_port.clear();
-            self.reload_store();
-            self.computer_msg = format!("Added host {}", c.name);
+        if self.store.upsert_computer(&computer).is_err() {
+            self.set_host_message("Could not save host.");
+            return;
         }
+        let id = computer.id;
+        self.reload_store();
+        self.load_host_form(id);
     }
 
-    pub fn picker_browse(&mut self) {
+    pub fn save_host(&mut self) {
+        if !self.host_save_enabled() {
+            return;
+        }
+        self.note_user_activity();
+        let Some(form) = self.host_form.clone() else {
+            return;
+        };
+        let HostFormTarget::Existing(id) = form.target else {
+            return;
+        };
+        let Some(mut computer) = self.computer(id).cloned() else {
+            return;
+        };
+        let Ok(port) = parse_port_field(&form.port) else {
+            return;
+        };
+        let name = form.name.trim().to_string();
+        if computer.is_local {
+            computer.name = name;
+            computer.color = Some(form.color);
+        } else {
+            let ssh = form.ssh.trim().to_string();
+            if self.endpoint_taken(&ssh, port, Some(id)) {
+                self.set_host_message("That host is already saved.");
+                return;
+            }
+            computer.name = name;
+            computer.ssh_destination = ssh;
+            computer.ssh_port = port;
+            computer.color = Some(form.color);
+        }
+        computer.updated_at = Utc::now();
+        if self.store.upsert_computer(&computer).is_err() {
+            self.set_host_message("Could not save host.");
+            return;
+        }
+        self.reload_store();
+        self.load_host_form(id);
+    }
+
+    pub fn begin_delete_host(&mut self) {
         if self.selections_locked() {
             return;
         }
-        let Some(picker) = &self.location_picker else {
+        self.note_user_activity();
+        let Some(form) = &self.host_form else {
             return;
         };
-        let side = picker.side;
-        let computer_id = picker.computer_id;
-        if let Some(cid) = computer_id {
-            let target = match side {
-                Side::Source => BrowseTarget::Source,
-                Side::Dest => BrowseTarget::Dest,
-            };
-            self.open_folder_browse(cid, target);
-        } else {
-            self.computer_msg = "Choose a host first".into();
+        let HostFormTarget::Existing(id) = form.target else {
+            return;
+        };
+        let local = self.computer(id).is_some_and(|computer| computer.is_local);
+        if local {
+            return;
+        }
+        if let Some(form) = &mut self.host_form {
+            form.confirm_delete = true;
+            form.message.clear();
         }
     }
 
-    pub fn picker_use_path(&mut self) {
+    pub fn cancel_delete_host(&mut self) {
+        self.note_user_activity();
+        if let Some(form) = &mut self.host_form {
+            form.confirm_delete = false;
+        }
+    }
+
+    pub fn confirm_delete_host(&mut self) {
         if self.selections_locked() {
             return;
         }
-        let Some(picker) = &self.location_picker else {
+        self.note_user_activity();
+        let Some(form) = self.host_form.clone() else {
             return;
         };
-        let side = picker.side;
-        let computer_id = picker.computer_id;
-        let path = picker.path_edit.trim().to_string();
-        if let Some(cid) = computer_id {
-            if !path.is_empty() {
-                let id = self.ensure_location(cid, PathBuf::from(path));
-                self.apply_location_selection(Some(id), side);
-                if side == Side::Source {
-                    self.start_list();
-                }
-                self.close_location_picker();
-            } else {
-                self.computer_msg = "Path required".into();
-            }
-        } else {
-            self.computer_msg = "Choose a host first".into();
+        let HostFormTarget::Existing(id) = form.target else {
+            return;
+        };
+        if !form.confirm_delete {
+            return;
         }
+        let clear_source = self
+            .source_location
+            .and_then(|loc_id| self.location(loc_id))
+            .is_some_and(|loc| loc.computer_id == id);
+        let clear_dest = self
+            .dest_location
+            .and_then(|loc_id| self.location(loc_id))
+            .is_some_and(|loc| loc.computer_id == id);
+        let removed = self.store.delete_computer(id).unwrap_or_default();
+        if !removed {
+            self.set_host_message("Could not delete host.");
+            return;
+        }
+        self.reload_store();
+        if clear_source {
+            self.apply_location_selection(None, Side::Source);
+        }
+        if clear_dest {
+            self.apply_location_selection(None, Side::Dest);
+        }
+        if self.source_computer == Some(id) {
+            self.source_computer = self.local_computer_id();
+        }
+        if self.dest_computer == Some(id) {
+            self.dest_computer = self.local_computer_id();
+        }
+        self.select_fallback_host();
+    }
+
+    fn edit_host_field(&mut self, edit: impl FnOnce(&mut HostForm)) {
+        if self.selections_locked() {
+            return;
+        }
+        self.note_user_activity();
+        if let Some(form) = &mut self.host_form {
+            edit(form);
+            form.confirm_delete = false;
+            form.message.clear();
+        }
+    }
+
+    fn set_host_message(&mut self, message: &str) {
+        if let Some(form) = &mut self.host_form {
+            form.message = message.to_string();
+        }
+    }
+
+    fn stored_palette_colors(&self) -> Vec<&'static str> {
+        self.computers
+            .iter()
+            .filter_map(|computer| {
+                let stored = computer.color.as_deref()?;
+                crate::util::HOST_PALETTE
+                    .iter()
+                    .copied()
+                    .find(|color| stored.eq_ignore_ascii_case(color))
+            })
+            .collect()
+    }
+
+    fn endpoint_taken(&self, ssh: &str, port: Option<u16>, except: Option<Uuid>) -> bool {
+        self.computers.iter().any(|computer| {
+            !computer.is_local
+                && Some(computer.id) != except
+                && endpoints_match(&computer.ssh_destination, computer.ssh_port, ssh, port)
+        })
+    }
+
+    fn local_computer_id(&self) -> Option<Uuid> {
+        self.computers
+            .iter()
+            .find(|computer| computer.is_local)
+            .map(|computer| computer.id)
+    }
+
+    fn select_fallback_host(&mut self) {
+        let id = self
+            .local_computer_id()
+            .or_else(|| self.computers.first().map(|computer| computer.id));
+        if let Some(id) = id {
+            self.load_host_form(id);
+        }
+    }
+
+    fn load_host_form(&mut self, id: Uuid) {
+        let Some(computer) = self.computer(id).cloned() else {
+            return;
+        };
+        let color = host_color(computer.id, computer.color.as_deref()).to_string();
+        let port = match computer.ssh_port {
+            Some(port) => port.to_string(),
+            None => String::new(),
+        };
+        self.host_form = Some(HostForm {
+            target: HostFormTarget::Existing(id),
+            name: computer.name,
+            ssh: computer.ssh_destination,
+            port,
+            color,
+            confirm_delete: false,
+            message: String::new(),
+        });
     }
 
     pub fn apply_location_selection(&mut self, location_id: Option<Uuid>, side: Side) {
@@ -1351,6 +1635,31 @@ impl AppState {
         if side == Side::Source {
             self.ensure_files_listed();
         }
+    }
+}
+
+fn host_record_dirty(computer: &Computer, form: &HostForm) -> bool {
+    if form.name.trim() != computer.name {
+        return true;
+    }
+    let color_pinned = computer.color.as_deref().is_some_and(|stored| {
+        stored.eq_ignore_ascii_case(&form.color)
+            && crate::util::HOST_PALETTE
+                .iter()
+                .any(|color| stored.eq_ignore_ascii_case(color))
+    });
+    if !color_pinned {
+        return true;
+    }
+    if computer.is_local {
+        return false;
+    }
+    if form.ssh.trim() != computer.ssh_destination {
+        return true;
+    }
+    match parse_port_field(&form.port) {
+        Ok(port) => port != computer.ssh_port,
+        Err(()) => false,
     }
 }
 

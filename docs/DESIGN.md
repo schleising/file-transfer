@@ -1,6 +1,6 @@
 # Design: Direct File Transfer (Rust GUI)
 
-**Status:** Implemented (personal-use **1.4.2**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
+**Status:** Implemented (personal-use **1.5.0**). This document describes the **as-built** system in this repo. `[workspace.package].version` is the **app** (`ft-app`); other crates pin their own version unless they are bumping in the same change. Bump with semver on **code** that ships; documentation-only edits do not change crate versions.
 
 Related: [Android LAN controller assessment](ANDROID.md) (not implemented). [Controller sleep / disconnect](SLEEP.md) (not implemented). [Same-volume hard links](HARDLINK.md) (not implemented). [Hosts page](HOSTS.md) (not implemented).
 
@@ -10,7 +10,7 @@ A **macOS** desktop application that orchestrates file transfers between compute
 
 File bytes move **directly from source to destination** when both are remote. They do not stream through the controller (avoid the `rsync user@A:… user@B:…` local-relay pitfall).
 
-Hosts are discoverable via **Avahi / Bonjour** (`_ssh._tcp`) from the Add Location sheet. Missing SSH keys or peer access **only blocks that transfer**; the app always launches and remains usable.
+Hosts are discoverable via **Avahi / Bonjour** (`_ssh._tcp`) from the Hosts page. Missing SSH keys or peer access **only blocks that transfer**; the app always launches and remains usable.
 
 On macOS the process stays running after the window is closed: it hides to a **menu-bar extra**. Quit from the extra or the File Transfer menu. **Open at Login** is a LaunchAgent (`~/Library/LaunchAgents/local.file-transfer.plist`) that starts the app hidden.
 
@@ -64,7 +64,7 @@ Source and/or destination may be the controller Mac itself.
 - Apple Developer signing, notarization, or third-party distribution.
 - Transfer **History** UI or persisted job records.
 - Native macOS folder picker (`rfd`).
-- Dedicated Computers / Locations / History tabs (hosts and folders are managed from the transfer wizard).
+- A wizard step for computers. Hosts is a sidebar page beside Source → Files → Destination. Folders stay on the wizard. There is no History tab.
 
 ---
 
@@ -129,11 +129,11 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 
 ## 5. Discovery (Avahi / Bonjour)
 
-- Crate `ft-mdns` browses **`_ssh._tcp.local.`** via the `mdns-sd` crate **only while the Add Location sheet is open** (the daemon is shut down when the sheet closes).
+- Crate `ft-mdns` browses **`_ssh._tcp.local.`** via the `mdns-sd` crate **only while the Hosts page is open** (the daemon is shut down when the page is left).
 - macOS Local Network privacy must be allowed for the app (Info.plist `NSLocalNetworkUsageDescription` + `NSBonjourServices` `_ssh._tcp`). Without it, multicast browse returns nothing and SSH to LAN hosts fails with **no route to host**.
-- The **Add Location** sheet lists discoveries as **Discovered on Network**; **Add Host** saves into the store.
+- The **Hosts** page lists discoveries as **Discovered on network**; **Add** saves into the store.
 - **Add host manually** (display name, SSH destination, optional port) remains supported.
-- There is no dedicated Computers tab and no in-app “Test SSH” action; reachability is the transfer preflight.
+- There is no in-app “Test SSH” action; reachability is the transfer preflight.
 - No custom DNS-SD service type in v1.
 
 ---
@@ -145,20 +145,22 @@ Personal use only: build locally and install via `./scripts/install-app.sh`. No 
 Sidebar + main stage + persistent footer.
 
 - **Sidebar** — brand (app icon, name, version; hover for crate versions); Source / Files / Destination steps; **Summary** of the current plan (source host/folder, selected files with hover list, destination host/folder); **Access status** (Untested / Testing / Accessible / Inaccessible); **Last transfer** always visible (**None** / **In progress** / **Complete** / **Failed** / **Cancelled**); **Reset** (clears the plan, Last transfer → None, returns to Source); footer caption “Direct rsync over SSH”.
-- **Main** — the active step. Source and Destination show **Add Location** in the page header. **Continue** / **Back** sit in the wizard bar.
+- **Main** — the active step. **Continue** / **Back** sit in the wizard bar on Source, Files, and Destination. **Hosts** has no wizard bar.
 - **Footer** — status, rate/ETA, progress bar, **Cancel** while transferring, primary **Transfer** (enabled only when Access status is Accessible).
 
 Selections are locked while preflight is running or a transfer is in progress.
 
 ### Steps
 
-1. **Source** — location tiles grouped by host. Click a folder tile to select it. Drag tiles to reorder within a host (persisted `sort_order`). Tile **×** deletes that saved location. **Add folder** on a host opens the in-app browser. **Add Location** opens the host/path sheet.
+1. **Source** — location tiles grouped by host. Click a folder tile to select it. Drag tiles to reorder within a host (persisted `sort_order`). Tile **×** deletes that saved location. **Add folder** on a host opens the in-app browser. **Hosts** in the sidebar adds, edits, and deletes computers.
 2. **Files** — lists the selected source folder (dotfiles hidden). Multi-select files and/or folders; Select All / Clear / Refresh. Continue requires at least one selection.
 3. **Destination** — same tile UI as Source, for the destination folder. Browsing a destination folder can **create a new subfolder**.
 
 ### Adding a location
 
-**Add Location** sheet: pick a saved host chip, optionally **Add Host** from Bonjour or **Add host manually**, then type an absolute path (**Use Path**) or **Browse…**. The same in-app folder browser is used for **This Mac** and remotes (list dirs, Up / Home / Go, Select this folder). On **destination** browse only, **New Folder** creates a directory in the current path (local `mkdir` or remote `mkdir` over SSH), then opens it. New paths are upserted as locations (`kind` is always `either`).
+**Hosts** page: saved computers on the left (This Mac first), Bonjour rows under **Discovered on network**, and an editor for the display name, SSH destination, port, and one of eight colours. **Add** on a discovery saves that host immediately. **Add host manually** uses the same editor. **Save** writes edits. **Delete Host** asks in the editor, then removes the computer and its saved folders. This Mac can be renamed and recoloured, and cannot be deleted. A stored colour is the host colour on Source and Destination; until one is saved, the colour stays the palette entry derived from the computer id.
+
+Folders are still saved from **Add folder**, which opens the in-app browser for **This Mac** and remotes (list dirs, Up / Home / Go, Select this folder). The browser path field accepts a typed absolute path. On **destination** browse only, **New Folder** creates a directory in the current path (local `mkdir` or remote `mkdir` over SSH), then opens it. New paths are upserted as locations (`kind` is always `either`).
 
 There is no native `rfd` folder dialog.
 
@@ -170,7 +172,7 @@ There is no native `rfd` folder dialog.
 4. When source, files, and destination are all set, preflight runs automatically. **Access status** updates in the sidebar.
 5. **Transfer** reuses the cached preflight plan (no second folder expand) → progress bar with rate and ETA; **Cancel** kills the local ssh/rsync child.
 6. UI shows **Transfer complete** as soon as rsync reports payload done (see §8); SSH teardown continues in the background. On success, macOS shows a notification titled **File Transfer** whose body is only **All transfers complete**. It does not name files, folders, hosts, or sizes. Failure and cancel do not notify. The first success asks for notification permission.
-7. **Five seconds** after the job ends (success, failure, or cancel), the same plan wipe as **Reset** runs unless the user interacts first (tab, selection, Add Location, Transfer, or Reset). Reset during the wait still runs immediately.
+7. **Five seconds** after the job ends (success, failure, or cancel), the same plan wipe as **Reset** runs unless the user interacts first (tab, selection, Hosts, Transfer, or Reset). Reset during the wait still runs immediately.
 8. After that wipe the footer is **Ready**. Sidebar **Last transfer** stays **Complete** / **Failed** / **Cancelled** (session-only). **Reset** sets Last transfer to **None**.
 
 Selected names appear in the running UI (file list and Summary hover). They are session-only.
@@ -269,7 +271,7 @@ A leftover `jobs` table is dropped on migrate if present.
 ```text
 Computer {
   id, name, ssh_destination, ssh_port?, identity_file?,
-  bonjour_name?, last_seen_at?, is_local, created_at, updated_at
+  bonjour_name?, last_seen_at?, color?, is_local, created_at, updated_at
 }
 
 Location {
@@ -282,7 +284,7 @@ Setting {
 }
 ```
 
-`identity_file` and location `kind` are stored for compatibility; the UI always writes `kind = either` and does not expose an identity-file picker. Hosts can be added from the location sheet; they cannot be deleted in-app.
+`identity_file` and location `kind` are stored for compatibility; the UI always writes `kind = either` and does not expose an identity-file picker. `color` is a palette hex from the Hosts page; null keeps the colour derived from the computer id. Remote hosts can be deleted from that page. This Mac cannot.
 
 On first open, a **This Mac** computer and a **Home** location are created automatically.
 
@@ -304,21 +306,21 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | `ft-app` | Dioxus UI; in-app folder browser (local and remote); menu-bar extra / Open at Login; window geometry; wires store + exec + mdns |
 | `ft-exec` | All process orchestration and progress |
 | `ft-store` | Persistence + privacy boundary |
-| `ft-mdns` | Discovery snapshot for the Add Location sheet |
+| `ft-mdns` | Discovery snapshot for the Hosts page |
 
 ---
 
 ## 12. GUI details
 
 - Toolkit: **Dioxus desktop 0.8** (WKWebView) with a macOS System Settings–style layout, SF Pro / `-apple-system` type, system accent, light and dark appearance.
-- Layout: **sidebar wizard** (Source, Files, Destination) under a transparent full-size titlebar; brand uses `AppIcon.png` plus the app version (hover lists `ft-app` / `ft-exec` / `ft-store` / `ft-mdns`); **Summary** + **Access status**; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel, Transfer).
+- Layout: **sidebar** (Source, Files, Destination, then Hosts) under a transparent full-size titlebar; brand uses `AppIcon.png` plus the app version (hover lists `ft-app` / `ft-exec` / `ft-store` / `ft-mdns`); **Summary** + **Access status**; **persistent bottom progress bar** (status, bytes, rate, ETA, Cancel, Transfer).
 - Icons: SF Symbol–style inline SVGs for nav, folders, files, network, status. Sidebar brand and **About File Transfer** use `AppIcon.png` with the same squircle mask macOS applies in the Dock and Launchpad.
-- Locations: Finder-like **tiles** grouped by host; live drag-reorder; Add folder / Add Location.
+- Locations: Finder-like **tiles** grouped by host; live drag-reorder; Add folder. Hosts page for computers (name, SSH, port, colour, delete).
 - Primary actions: **Continue** / **Reset** / **Transfer** use the system blue accent.
 - App menu **About File Transfer** shows name, marketing version, copyright, credits, and the app icon (not a cargo pkgid). `install-app.sh` writes the same marketing version into `CFBundleShortVersionString` / `CFBundleVersion`.
 - Packaging: minimal `Info.plist` (including Local Network / Bonjour keys) + `AppIcon.icns` + binary `Contents/MacOS/file-transfer` (not cargo-bundle); `install-app.sh` codesigns the installed app.
 - macOS extra: template menu-bar icon (a ring around the arrows while a transfer is running, then the default glyph); left-click toggles the window; right-click shows Open at Login and Quit. Close button **hides** the window (`WindowCloseBehaviour::WindowHides`).
-- Background UI loop: drain the transfer channel only when a message is pending (a Dioxus `write()` otherwise re-renders the whole app); poll slower while the window is hidden and idle. Bonjour host names in the Add Location sheet refresh about twice a second while that sheet is visible.
+- Background UI loop: drain the transfer channel only when a message is pending (a Dioxus `write()` otherwise re-renders the whole app); poll slower while the window is hidden and idle. Bonjour host names on the Hosts page refresh about twice a second while that page is visible.
 
 ---
 
@@ -357,7 +359,7 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Workspace crates + Dioxus 0.8 app | Done |
 | Store + This Mac / Home defaults | Done |
 | Local ↔ remote ↔ remote→remote (push/pull) | Done |
-| Bonjour `_ssh._tcp` + save from Add Location | Done |
+| Bonjour `_ssh._tcp` + Hosts page (add, edit, colour, delete) | Done |
 | In-app folder browse (local and remote) | Done |
 | Destination browse: New Folder | Done |
 | Location tiles, drag reorder, delete | Done |
@@ -395,8 +397,8 @@ scripts/install-app.sh   release build → File Transfer.app → /Applications
 | Topic | Decision / as-built |
 |-------|---------------------|
 | GUI | **Dioxus desktop 0.8** (macOS-styled WKWebView) |
-| Navigation | **Source → Files → Destination** wizard; no Computers / Locations / History tabs |
-| Locations | **Tiles per host**; drag to reorder; Add Location sheet for hosts + paths |
+| Navigation | **Source → Files → Destination** wizard, plus a **Hosts** page under those steps |
+| Locations | **Tiles per host**; drag to reorder; Add folder opens the browser. Hosts page edits computers |
 | Folder pick | **In-app browser** for both This Mac and remotes (not `rfd`); dest browse can create a folder |
 | Access | **Automatic preflight** caches the plan; Transfer enabled only when Accessible |
 | Window | Default **1280×840**; persist logical size + position in `settings` |

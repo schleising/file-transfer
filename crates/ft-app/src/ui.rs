@@ -8,6 +8,9 @@ use dioxus::prelude::*;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod hosts_step;
+use hosts_step::HostsStep;
+
 pub fn app() -> Element {
     let mut state = use_signal(AppState::new);
     use_context_provider(|| state);
@@ -18,25 +21,21 @@ pub fn app() -> Element {
     use_future(move || async move {
         loop {
             let visible = dioxus::desktop::window().window.is_visible();
-            let (busy, pending, picker_open) = {
+            let (busy, pending, hosts_open) = {
                 let s = state.read();
-                (
-                    s.bg_work_active(),
-                    s.bg_pending(),
-                    s.location_picker.is_some(),
-                )
+                (s.bg_work_active(), s.bg_pending(), s.tab == NavTab::Hosts)
             };
             if pending {
                 state.write().poll_bg();
-            } else if picker_open && visible {
-                // Bonjour updates a map in the mdns thread; refresh the sheet so hosts appear.
+            } else if hosts_open && visible {
+                // Bonjour updates a map in the mdns thread; refresh Hosts so names appear.
                 let _ = state.write();
             }
             let ms = if !visible && !busy {
                 1000
             } else if busy {
                 100
-            } else if picker_open {
+            } else if hosts_open {
                 500
             } else {
                 250
@@ -46,7 +45,6 @@ pub fn app() -> Element {
     });
 
     let tab = state.read().tab;
-    let show_picker = state.read().location_picker.is_some();
     let show_browser = state.read().folder_browser.is_some();
 
     rsx! {
@@ -56,20 +54,24 @@ pub fn app() -> Element {
             section { class: "main",
                 div { class: "page",
                     PageHeader {}
-                    div { class: "page-scroll",
-                        match tab {
-                            NavTab::Source => rsx! { SourceStep {} },
-                            NavTab::Files => rsx! { FilesStep {} },
-                            NavTab::Destination => rsx! { DestinationStep {} },
-                        }
+                    match tab {
+                        NavTab::Hosts => rsx! { HostsStep {} },
+                        NavTab::Source => rsx! {
+                            div { class: "page-scroll", SourceStep {} }
+                            WizardBar {}
+                        },
+                        NavTab::Files => rsx! {
+                            div { class: "page-scroll", FilesStep {} }
+                            WizardBar {}
+                        },
+                        NavTab::Destination => rsx! {
+                            div { class: "page-scroll", DestinationStep {} }
+                            WizardBar {}
+                        },
                     }
-                    WizardBar {}
                 }
             }
             Footer {}
-        }
-        if show_picker {
-            LocationPickerSheet {}
         }
         if show_browser {
             FolderBrowserSheet {}
@@ -162,6 +164,14 @@ fn Sidebar() -> Element {
                     kind: Glyph::Folder,
                     label: "Destination",
                     onclick: move |_| state.write().set_tab(NavTab::Destination),
+                }
+                div { class: "nav-sep" }
+                NavButton {
+                    tab: NavTab::Hosts,
+                    current: tab,
+                    kind: Glyph::Network,
+                    label: "Hosts",
+                    onclick: move |_| state.write().set_tab(NavTab::Hosts),
                 }
             }
             div { class: "sidebar-panel",
@@ -291,26 +301,13 @@ fn NavButton(
 
 #[component]
 fn PageHeader() -> Element {
-    let mut state = use_context::<Signal<AppState>>();
+    let state = use_context::<Signal<AppState>>();
     let tab = state.read().tab;
-    let action = matches!(tab, NavTab::Source | NavTab::Destination);
-    let locked = state.read().selections_locked();
     rsx! {
         header { class: "page-header",
             div {
                 h2 { "{tab.title()}" }
                 p { "{tab.subtitle()}" }
-            }
-            if action {
-                button {
-                    class: "btn btn-primary",
-                    disabled: locked,
-                    onclick: move |_| {
-                        let side = if tab == NavTab::Source { Side::Source } else { Side::Dest };
-                        state.write().open_location_picker(side);
-                    },
-                    "Add Location"
-                }
             }
         }
     }
@@ -517,7 +514,7 @@ fn LocationTiles(side: Side) -> Element {
         for (computer, locs) in groups {
             {
                 let computer_id = computer.id;
-                let color = host_color(computer.id);
+                let color = host_color(computer.id, computer.color.as_deref());
                 let loc_ids: Vec<Uuid> = locs.iter().map(|l| l.id).collect();
                 let visual = tile_preview_ids(preview(), computer_id, &loc_ids);
                 let slot = dragging().and_then(|(id, cid)| {
@@ -886,177 +883,6 @@ fn Footer() -> Element {
             div { class: "progress-meta", "{detail}" }
             div { class: "progress-track",
                 div { class: fill_class, style: "{fill_style}" }
-            }
-        }
-    }
-}
-
-#[component]
-fn LocationPickerSheet() -> Element {
-    let mut state = use_context::<Signal<AppState>>();
-    let computers = state.read().computers.clone();
-    let picker_computer = state
-        .read()
-        .location_picker
-        .as_ref()
-        .and_then(|p| p.computer_id);
-    let side = state
-        .read()
-        .location_picker
-        .as_ref()
-        .map(|p| p.side)
-        .unwrap_or(Side::Source);
-    let title = match side {
-        Side::Source => "New Source Location",
-        Side::Dest => "New Destination Location",
-    };
-    let path_edit = state
-        .read()
-        .location_picker
-        .as_ref()
-        .map(|p| p.path_edit.clone())
-        .unwrap_or_default();
-    let show_manual = state
-        .read()
-        .location_picker
-        .as_ref()
-        .map(|p| p.show_manual_host)
-        .unwrap_or(false);
-    let discovered = state.read().discovered_hosts();
-    let new_name = state.read().new_name.clone();
-    let new_ssh = state.read().new_ssh.clone();
-    let new_port = state.read().new_port.clone();
-    let computer_msg = state.read().computer_msg.clone();
-
-    rsx! {
-        div {
-            class: "backdrop",
-            onclick: move |_| state.write().close_location_picker(),
-            div {
-                class: "sheet",
-                onclick: move |evt| evt.stop_propagation(),
-                h3 { "{title}" }
-                p { class: "sheet-sub", "Select where the folder lives, then choose a path." }
-
-                div { class: "field-label", "Host" }
-                div { class: "chips",
-                    for c in computers {
-                        {
-                            let id = c.id;
-                            let selected = picker_computer == Some(id);
-                            let class = if selected { "chip is-selected" } else { "chip" };
-                            let label = if c.is_local {
-                                format!("{} (This Mac)", c.name)
-                            } else {
-                                c.name.clone()
-                            };
-                            rsx! {
-                                button {
-                                    class,
-                                    key: "{id}",
-                                    onclick: move |_| state.write().picker_set_computer(id),
-                                    "{label}"
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !discovered.is_empty() {
-                    div { class: "field-label", style: "margin-top: 14px;", "Discovered on Network" }
-                    div { class: "discovered",
-                        for host in discovered {
-                            {
-                                let name = host.name.clone();
-                                let dest = host.host.clone();
-                                let port = host.port;
-                                rsx! {
-                                    div { class: "discovered-row", key: "{name}-{dest}-{port}",
-                                        Icon { kind: Glyph::Network }
-                                        span { "{name} — {dest}:{port}" }
-                                        button {
-                                            class: "btn",
-                                            onclick: move |_| state.write().add_discovered_host(
-                                                name.clone(),
-                                                dest.clone(),
-                                                port,
-                                            ),
-                                            "Add Host"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                button {
-                    class: "disclosure",
-                    onclick: move |_| {
-                        if let Some(p) = state.write().location_picker.as_mut() {
-                            p.show_manual_host = !p.show_manual_host;
-                        }
-                    },
-                    if show_manual { "Hide manual host" } else { "Add host manually" }
-                }
-                if show_manual {
-                    div { class: "manual",
-                        div { class: "field",
-                            label { "Display name" }
-                            input {
-                                r#type: "text",
-                                value: "{new_name}",
-                                oninput: move |e| state.write().new_name = e.value(),
-                            }
-                        }
-                        div { class: "field",
-                            label { "SSH destination" }
-                            input {
-                                r#type: "text",
-                                value: "{new_ssh}",
-                                oninput: move |e| state.write().new_ssh = e.value(),
-                            }
-                        }
-                        div { class: "field",
-                            label { "Port (optional)" }
-                            input {
-                                r#type: "text",
-                                value: "{new_port}",
-                                oninput: move |e| state.write().new_port = e.value(),
-                            }
-                        }
-                        button { class: "btn", onclick: move |_| state.write().add_manual_host(), "Add Host" }
-                    }
-                }
-
-                if !computer_msg.is_empty() {
-                    div { class: "msg", "{computer_msg}" }
-                }
-
-                div { class: "section-gap" }
-                div { class: "field-label", "Folder" }
-                div { class: "path-row",
-                    input {
-                        r#type: "text",
-                        placeholder: "absolute path…",
-                        value: "{path_edit}",
-                        oninput: move |e| {
-                            if let Some(p) = state.write().location_picker.as_mut() {
-                                p.path_edit = e.value();
-                            }
-                        },
-                    }
-                }
-                div { class: "sheet-actions",
-                    button { class: "btn", onclick: move |_| state.write().close_location_picker(), "Cancel" }
-                    button {
-                        class: "btn",
-                        onclick: move |_| state.write().picker_browse(),
-                        Icon { kind: Glyph::Folder }
-                        "Browse…"
-                    }
-                    button { class: "btn btn-primary", onclick: move |_| state.write().picker_use_path(), "Use Path" }
-                }
             }
         }
     }

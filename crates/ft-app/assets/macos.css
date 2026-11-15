@@ -258,6 +258,12 @@ textarea {
   gap: 2px;
 }
 
+.nav-sep {
+  height: 0.5px;
+  background: var(--separator);
+  margin: 8px 8px;
+}
+
 .nav-item {
   display: flex;
   align-items: center;
@@ -1000,6 +1006,10 @@ input[type="text"] {
   box-shadow: 0 0.5px 0.5px rgba(0, 0, 0, 0.04) inset;
 }
 
+input[type="text"]::placeholder {
+  color: var(--tertiary);
+}
+
 input[type="text"]:focus {
   outline: none;
   border-color: var(--accent);
@@ -1268,4 +1278,224 @@ input[type="checkbox"]:checked {
 .manual {
   display: grid;
   gap: 4px;
+}
+
+.hosts-step {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.lock-note {
+  margin: -8px 0 14px;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.hosts-split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  padding-bottom: 16px;
+  overflow: auto;
+}
+
+.hosts-card {
+  border: 0.5px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--content);
+  box-shadow: var(--shadow);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.host-row {
+  appearance: none;
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 0.5px solid var(--separator);
+  background: transparent;
+  padding: 10px 12px;
+  color: inherit;
+  font: inherit;
+  cursor: default;
+}
+
+.host-row.is-selected {
+  background: var(--row-selected);
+}
+
+.host-row.add-row {
+  grid-template-columns: 16px 1fr;
+  color: var(--accent);
+  font-weight: 510;
+}
+
+.host-row.add-row svg {
+  width: 14px;
+  height: 14px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.18);
+}
+
+.host-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.host-sub {
+  color: var(--secondary);
+  font-size: 12px;
+  margin-top: 1px;
+}
+
+.host-meta {
+  color: var(--tertiary);
+  font-size: 11px;
+}
+
+.disc {
+  border-top: 0.5px solid var(--separator);
+  padding: 12px 12px 8px;
+}
+
+.disc h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tertiary);
+}
+
+.disc-row {
+  padding: 6px 0;
+}
+
+.disc-row svg {
+  color: var(--secondary);
+}
+
+.editor {
+  padding: 18px 18px 16px;
+}
+
+.editor .field {
+  max-width: 420px;
+}
+
+.port-field {
+  max-width: 120px;
+}
+
+.swatches {
+  display: flex;
+  gap: 10px;
+  margin: 2px 0 14px;
+}
+
+.swatch {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 0;
+  padding: 0;
+  background: var(--c);
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.16);
+  cursor: default;
+}
+
+.swatch.is-on {
+  box-shadow: 0 0 0 2px var(--content), 0 0 0 4px var(--c);
+}
+
+.swatch:disabled {
+  opacity: 0.45;
+}
+
+.net-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ok);
+  font-size: 12px;
+  font-weight: 550;
+  margin: 2px 0 8px;
+}
+
+.net-line i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  display: block;
+}
+
+.editor-note {
+  color: var(--secondary);
+  font-size: 12px;
+  margin: 0 0 12px;
+  max-width: 440px;
+}
+
+.editor-actions {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.editor-actions .grow {
+  flex: 1;
+}
+
+.btn.btn-quiet-danger {
+  background: transparent;
+  color: var(--err);
+}
+
+.btn.btn-quiet-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+.btn.btn-fill-danger {
+  background: var(--err);
+  color: #fff;
+}
+
+.btn.btn-fill-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--err) 88%, black);
+}
+
+.confirm {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--err) 8%, var(--sidebar));
+}
+
+.confirm p {
+  margin: 0;
+  flex: 1;
+  font-size: 13px;
 }

@@ -1,6 +1,6 @@
 # Design: Hosts page
 
-**Status:** Not implemented. The as-built Mac app remains [DESIGN.md](DESIGN.md). This document replaces the **Add Location** sheet with a **Hosts** page: add a computer from the network or by hand, change its name and colour, and delete it.
+**Status:** Implemented in app **1.5.0**. [DESIGN.md](DESIGN.md) is the as-built description. This document is the spec for the **Hosts** page: add a computer from the network or by hand, change its name and colour, and delete it.
 
 Mockups below use the app’s stylesheet at the window size **1280×840**. They are drawings for review, not screenshots of a build. The drawing source is [hosts/mockup.html](hosts/mockup.html).
 
